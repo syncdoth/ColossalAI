@@ -2,9 +2,10 @@ from typing import List, Optional, Dict
 
 import torch
 import torch.nn.functional as F
-from retnet import RetNetCausalLMOutputWithPast, RetNetModel, RetNetOutputWithPast, RetNetForCausalLM
-from torch.nn import CrossEntropyLoss
+from retnet.retnet.modeling_retnet import RetNetCausalLMOutputWithPast, RetNetModel, RetNetOutputWithPast, RetNetForCausalLM, RetNetForSequenceClassification
+from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss
 from transformers.utils import logging
+from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
 from colossalai.pipeline.stage_manager import PipelineStageManager
 
@@ -57,7 +58,7 @@ class RetNetPipelineForwards:
                 raise ValueError("You have to specify either input_ids or inputs_embeds")
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             if inputs_embeds is None:
-                inputs_embeds = self.forward_embedding(input_ids, inputs_embeds, past_key_values)
+                inputs_embeds = self.forward_embedding(input_ids, forward_impl, inputs_embeds, past_key_values)
         else:
             input_shape = hidden_states.shape[:-1]
             batch_size, seq_length = input_shape
@@ -68,6 +69,9 @@ class RetNetPipelineForwards:
 
         if retention_mask is None and attention_mask is not None:
             retention_mask = attention_mask
+
+        if retention_mask is not None and forward_impl == 'recurrent':
+            retention_mask = retention_mask[:, -1:]
 
         hidden_states = inputs_embeds
 
@@ -308,6 +312,131 @@ class RetNetPipelineForwards:
                 hidden_states=outputs.hidden_states,
                 retentions=outputs.retentions,
             )
+        else:
+            hidden_states = outputs.get("hidden_states")
+            return {"hidden_states": hidden_states}
+
+    @staticmethod
+    def retnet_for_sequence_classification_forward(
+        self: RetNetForSequenceClassification,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        retention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        forward_impl: Optional[str] = "parallel",
+        recurrent_chunk_size: Optional[int] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        stage_manager: Optional[PipelineStageManager] = None,
+        hidden_states: Optional[torch.FloatTensor] = None,
+        stage_index: Optional[List[int]] = None,
+    ):
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        logger = logging.get_logger(__name__)
+
+        del position_ids  # RetNet does not use position_ids
+        logger = logging.get_logger(__name__)
+        output_retentions = output_attentions if output_attentions is not None else self.config.output_retentions
+        output_hidden_states = (output_hidden_states if output_hidden_states is not None else
+                                self.config.output_hidden_states)
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        forward_impl = forward_impl if forward_impl is not None else self.config.forward_impl
+        recurrent_chunk_size = recurrent_chunk_size if recurrent_chunk_size is not None else self.config.recurrent_chunk_size
+
+        # TODO(jianghai): left the recording kv-value tensors as () or None type, this feature may be added in the future.
+        if output_retentions:
+            logger.warning_once("output_attentions=True is not supported for pipeline models at the moment.")
+            output_retentions = False
+        if output_hidden_states:
+            logger.warning_once("output_hidden_states=True is not supported for pipeline models at the moment.")
+            output_hidden_states = False
+
+        outputs = RetNetPipelineForwards.retnet_model_forward(
+            self.model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            retention_mask=retention_mask,
+            forward_impl=forward_impl,
+            recurrent_chunk_size=recurrent_chunk_size,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            stage_manager=stage_manager,
+            hidden_states=hidden_states,
+            stage_index=stage_index,
+        )
+
+        if input_ids is not None:
+            batch_size = input_ids.shape[0]
+        elif inputs_embeds is not None:
+            batch_size = inputs_embeds.shape[0]
+        else:
+            batch_size = hidden_states.shape[0]
+
+        if stage_manager.is_last_stage():
+            hidden_states = outputs[0]
+            logits = self.score(hidden_states)
+
+            if self.config.pad_token_id is None and batch_size != 1:
+                raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+            if self.config.pad_token_id is None:
+                sequence_lengths = -1
+            else:
+                if input_ids is not None:
+                    sequence_lengths = (torch.ne(input_ids, self.config.pad_token_id).sum(-1) - 1).to(logits.device)
+                else:
+                    sequence_lengths = -1
+
+            pooled_logits = logits[torch.arange(batch_size, device=logits.device), sequence_lengths]
+
+            loss = None
+            if labels is not None:
+                labels = labels.to(logits.device)
+                if self.config.problem_type is None:
+                    if self.num_labels == 1:
+                        self.config.problem_type = "regression"
+                    elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                        self.config.problem_type = "single_label_classification"
+                    else:
+                        self.config.problem_type = "multi_label_classification"
+
+                if self.config.problem_type == "regression":
+                    loss_fct = MSELoss()
+                    if self.num_labels == 1:
+                        loss = loss_fct(pooled_logits.squeeze(), labels.squeeze())
+                    else:
+                        loss = loss_fct(pooled_logits, labels)
+                elif self.config.problem_type == "single_label_classification":
+                    loss_fct = CrossEntropyLoss()
+                    loss = loss_fct(pooled_logits.view(-1, self.num_labels), labels.view(-1))
+                elif self.config.problem_type == "multi_label_classification":
+                    loss_fct = BCEWithLogitsLoss()
+                    loss = loss_fct(pooled_logits, labels)
+            if not return_dict:
+                output = (pooled_logits,) + outputs[1:]
+                return ((loss,) + output) if loss is not None else output
+
+            return SequenceClassifierOutputWithPast(
+                loss=loss,
+                logits=pooled_logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+
         else:
             hidden_states = outputs.get("hidden_states")
             return {"hidden_states": hidden_states}

@@ -5,7 +5,8 @@
 [submodule "examples/tutorial/fastfold/FastFold"]
 	path = examples/tutorial/fastfold/FastFold
 	url = https://github.com/hpcaitech/FastFold
+	branch = main
 [submodule "retnet"]
 	path = retnet
 	url = https://github.com/syncdoth/retnet.git
-	branch = dev
+	branch = shardformer

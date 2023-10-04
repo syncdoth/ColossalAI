@@ -63,6 +63,16 @@ _POLICY_LIST = {
     "transformers.models.llama.modeling_llama.LlamaForSequenceClassification": PolicyLocation(
         file_name="llama", class_name="LlamaForSequenceClassificationPolicy"
     ),
+    # RetNet
+    "retnet.retnet.modeling_retnet.RetNetModel": PolicyLocation(
+        file_name="retnet", class_name="RetNetModelPolicy"
+    ),
+    "retnet.retnet.modeling_retnet.RetNetForCausalLM": PolicyLocation(
+        file_name="retnet", class_name="RetNetForCausalLMPolicy"
+    ),
+    "retnet.retnet.modeling_retnet.RetNetForSequenceClassification": PolicyLocation(
+        file_name="retnet", class_name="RetNetForSequenceClassificationPolicy"
+    ),
     # T5
     "transformers.models.t5.modeling_t5.T5Model": PolicyLocation(file_name="t5", class_name="T5ModelPolicy"),
     "transformers.models.t5.modeling_t5.T5ForConditionalGeneration": PolicyLocation(

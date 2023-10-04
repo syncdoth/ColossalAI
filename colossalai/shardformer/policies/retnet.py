@@ -11,7 +11,7 @@ from colossalai.shardformer.layer import FusedRMSNorm, FusedLayerNorm, Linear1D_
 from ..modeling.retnet import RetNetPipelineForwards
 from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
 
-__all__ = ["RetNetPolicy", "RetNetForCausalLMPolicy"]
+__all__ = ["RetNetPolicy", "RetNetForCausalLMPolicy", "RetNetForSequenceClassificationPolicy"]
 
 
 class RetNetPolicy(Policy):
@@ -32,7 +32,7 @@ class RetNetPolicy(Policy):
         return self.model
 
     def module_policy(self) -> Dict[Union[str, nn.Module], ModulePolicyDescription]:
-        from retnet import MultiScaleRetention, RetNetDecoderLayer, RetNetModel, FeedForwardNetwork, GLU  # TODO
+        from retnet.retnet.modeling_retnet import MultiScaleRetention, RetNetDecoderLayer, RetNetModel, FeedForwardNetwork
 
         policy = {}
 
@@ -45,52 +45,75 @@ class RetNetPolicy(Policy):
         if self.shard_config.enable_tensor_parallelism:
             # TODO: check more over here
             decoder_attribute_replacement = {
-                "retention.embed_dim":
-                    self.model.config.decoder_embed_dim // self.shard_config.tensor_parallel_size,
+                "retention.value_dim":
+                    self.model.config.decoder_value_embed_dim // self.shard_config.tensor_parallel_size,
                 "retention.num_heads":
                     self.model.config.decoder_retention_heads //
                     self.shard_config.tensor_parallel_size,
+                "retnet_rel_pos.num_heads": self.model.config.decoder_retention_heads //
+                                            self.shard_config.tensor_parallel_size,
+                # for subln
+                "ffn.ffn_layernorm.normalized_shape": self.model.config.decoder_ffn_embed_dim // self.shard_config.tensor_parallel_size,
+                "ffn.ffn_layernorm.elementwise_affine": False,  # TODO: this should be true.
             }
+
+            sub_module_replacement = [
+                SubModuleReplacementDescription(
+                    suffix="retention.q_proj",
+                    target_module=Linear1D_Col,
+                ),
+                SubModuleReplacementDescription(
+                    suffix="retention.k_proj",
+                    target_module=Linear1D_Col,
+                ),
+                SubModuleReplacementDescription(
+                    suffix="retention.v_proj",
+                    target_module=Linear1D_Col,
+                ),
+                SubModuleReplacementDescription(
+                    suffix="retention.g_proj",
+                    target_module=Linear1D_Col,
+                ),
+                SubModuleReplacementDescription(
+                    suffix="retention.out_proj",
+                    target_module=Linear1D_Row,
+                ),
+            ]
+
+            if self.model.config.use_glu:
+                sub_module_replacement.append(
+                    SubModuleReplacementDescription(
+                        suffix="ffn.gate",
+                        target_module=Linear1D_Col,
+                    ),
+                )
+            sub_module_replacement.extend([
+                SubModuleReplacementDescription(
+                    suffix="ffn.fc1",
+                    target_module=Linear1D_Col,
+                ),
+                SubModuleReplacementDescription(
+                    suffix="ffn.fc2",
+                    target_module=Linear1D_Row,
+                ),
+            ])
 
             policy[RetNetDecoderLayer] = ModulePolicyDescription(
                 attribute_replacement=decoder_attribute_replacement,
-                sub_module_replacement=[
-                    SubModuleReplacementDescription(
-                        suffix="retention.q_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="retention.k_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="retention.v_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="retention.g_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="retention.out_proj",
-                        target_module=Linear1D_Row,  # TODO: check diff between Col and Row
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="ffn.fc1",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="ffn.fc2",
-                        target_module=Linear1D_Row,
-                    ),
-                ],
+                sub_module_replacement=sub_module_replacement,
             )
 
             self.append_or_create_submodule_replacement(
-                description=SubModuleReplacementDescription(
-                    suffix="embed_tokens",
-                    target_module=VocabParallelEmbedding1D,
-                ),
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="embed_tokens",
+                        target_module=VocabParallelEmbedding1D,
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="retnet_rel_pos.proj",
+                        target_module=Linear1D_Col,
+                    ),
+                ],
                 policy=policy,
                 target_key=RetNetModel,
             )
@@ -106,7 +129,7 @@ class RetNetPolicy(Policy):
                 target_key=MultiScaleRetention,
             )
 
-            if self.model.config.subln:
+            if self.model.config.subln and not self.model.config.use_glu:
                 self.append_or_create_submodule_replacement(
                     description=SubModuleReplacementDescription(
                         suffix="ffn_layernorm",
@@ -201,8 +224,6 @@ class RetNetPolicy(Policy):
         if stage_manager.is_last_stage():
             if module.layer_norm is not None:
                 held_layers.append(module.layer_norm)
-            else:  # TODO
-                held_layers.append(module.layer_norm)
 
         return held_layers
 
@@ -214,7 +235,7 @@ class RetNetModelPolicy(RetNetPolicy):
 
     def module_policy(self):
         policy = super().module_policy()
-        from retnet import RetNetModel
+        from retnet.retnet.modeling_retnet import RetNetModel
 
         if self.pipeline_stage_manager:
             # set None as default
@@ -236,7 +257,7 @@ class RetNetModelPolicy(RetNetPolicy):
 class RetNetForCausalLMPolicy(RetNetPolicy):
 
     def module_policy(self):
-        from retnet import RetNetForCausalLM
+        from retnet.retnet.modeling_retnet import RetNetForCausalLM
 
         policy = super().module_policy()
 
@@ -279,4 +300,45 @@ class RetNetForCausalLMPolicy(RetNetPolicy):
                     0: retnet_model.embed_tokens.weight,
                     self.pipeline_stage_manager.num_stages - 1: self.model.lm_head.weight,
                 }]
+        return []
+
+
+class RetNetForSequenceClassificationPolicy(RetNetPolicy):
+    def module_policy(self):
+        from retnet.retnet.modeling_retnet import RetNetForSequenceClassification
+
+        policy = super().module_policy()
+
+        if self.shard_config.enable_tensor_parallelism:
+            # add a new item for sequence classification
+            new_item = {
+                RetNetForSequenceClassification: ModulePolicyDescription(
+                    sub_module_replacement=[
+                        SubModuleReplacementDescription(
+                            suffix="score", target_module=Linear1D_Col, kwargs=dict(gather_output=True)
+                        )
+                    ]
+                )
+            }
+            policy.update(new_item)
+        # to be confirmed
+        if self.pipeline_stage_manager:
+            # set None as default
+            self.set_pipeline_forward(
+                model_cls=RetNetForSequenceClassification,
+                new_forward=RetNetPipelineForwards.llama_for_sequence_classification_forward,
+                policy=policy,
+            )
+        return policy
+
+    def get_held_layers(self) -> List[Module]:
+        """Get pipeline layers for current stage."""
+        stage_manager = self.pipeline_stage_manager
+        held_layers = super().get_held_layers()
+        if stage_manager.is_last_stage():
+            held_layers.append(self.model.score)
+        return held_layers
+
+    def get_shared_params(self) -> List[Dict[int, Tensor]]:
+        """No shared params in llama for sequence classification model"""
         return []
