@@ -29,27 +29,12 @@ from colossalai.nn.lr_scheduler import CosineAnnealingWarmupLR
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
 
-
-def get_model_numel(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters())
+from .model_utils import format_numel_str, get_model_numel
 
 
-def format_numel_str(numel: int) -> str:
-    B = 1024**3
-    M = 1024**2
-    K = 1024
-    if numel >= B:
-        return f"{numel / B:.2f} B"
-    elif numel >= M:
-        return f"{numel / M:.2f} M"
-    elif numel >= K:
-        return f"{numel / K:.2f} K"
-    else:
-        return f"{numel}"
 
-
-def tokenize_batch_for_finetune(batch, tokenizer: Optional[LlamaTokenizer] = None, max_length: int = 2048):
-    texts = [sample["prompt"] + sample["completion"] for sample in batch]
+def tokenize_batch_for_pretrain(batch, tokenizer: Optional[LlamaTokenizer] = None, max_length: int = 2048):
+    texts = [sample["text"] for sample in batch]
     data = tokenizer(texts, return_tensors="pt", padding="max_length", truncation=True, max_length=max_length)
     data = {k: v.cuda() for k, v in data.items()}
     data["labels"] = data["input_ids"].clone()
@@ -184,19 +169,6 @@ def main():
         writer = SummaryWriter(args.tensorboard_dir)
 
     # ==============================
-    # Initialize Model, Optimizer and LR Scheduler
-    # ==============================
-
-    config = LlamaConfig.from_pretrained(args.model_path)
-    # use lazy init when using GeminiPlugin
-    init_ctx = (
-        LazyInitContext(default_device=get_current_device()) if isinstance(plugin, GeminiPlugin) else nullcontext()
-    )
-
-    with init_ctx:
-        model = LlamaForCausalLM(config)
-
-    # ==============================
     # Initialize Tokenizer, Dataset and Dataloader
     # ==============================
     tokenizer = LlamaTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer")
@@ -212,6 +184,18 @@ def main():
         drop_last=True,
         collate_fn=partial(tokenize_batch_for_finetune, tokenizer=tokenizer, max_length=args.max_length),
     )
+
+    # ==============================
+    # Initialize Model, Optimizer and LR Scheduler
+    # ==============================
+    config = LlamaConfig.from_pretrained(args.model_path)
+    # use lazy init when using GeminiPlugin
+    init_ctx = (
+        LazyInitContext(default_device=get_current_device()) if isinstance(plugin, GeminiPlugin) else nullcontext()
+    )
+
+    with init_ctx:
+        model = LlamaForCausalLM(config)
 
     if args.grad_checkpoint:
         model.gradient_checkpointing_enable()

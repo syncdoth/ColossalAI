@@ -28,6 +28,9 @@ from colossalai.nn.lr_scheduler import CosineAnnealingWarmupLR
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
 
+from .model_utils import format_numel_str, get_model_numel
+
+
 MODEL_CONFIGS = {
     "7b": LlamaConfig(max_position_embeddings=4096),
     "13b": LlamaConfig(
@@ -46,24 +49,6 @@ MODEL_CONFIGS = {
         num_key_value_heads=8,
     ),
 }
-
-
-def get_model_numel(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters())
-
-
-def format_numel_str(numel: int) -> str:
-    B = 1024**3
-    M = 1024**2
-    K = 1024
-    if numel >= B:
-        return f"{numel / B:.2f} B"
-    elif numel >= M:
-        return f"{numel / M:.2f} M"
-    elif numel >= K:
-        return f"{numel / K:.2f} K"
-    else:
-        return f"{numel}"
 
 
 def tokenize_batch_for_pretrain(batch, tokenizer: Optional[LlamaTokenizer] = None, max_length: int = 2048):
@@ -242,8 +227,9 @@ def main():
     coordinator.print_on_master(f"Model params: {format_numel_str(model_numel)}")
 
     optimizer = HybridAdam(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weigth_decay)
+    total_step = args.num_epochs * len(dataloader)
     lr_scheduler = CosineAnnealingWarmupLR(
-        optimizer, total_steps=args.num_epochs * len(dataloader), warmup_steps=args.warmup_steps, eta_min=0.1 * args.lr
+        optimizer, total_steps=total_step, warmup_steps=args.warmup_steps, eta_min=0.1 * args.lr
     )
     default_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
     torch.set_default_dtype(default_dtype)
