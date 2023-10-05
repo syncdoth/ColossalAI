@@ -400,6 +400,7 @@ class HybridParallelPlugin(PipelinePluginBase):
             enable_sequence_parallelism=enable_sequence_parallelism,
             enable_sequence_overlap=enable_sequence_overlap,
         )
+
         self.amp_config = dict(
             initial_scale=initial_scale,
             growth_factor=growth_factor,
@@ -419,12 +420,18 @@ class HybridParallelPlugin(PipelinePluginBase):
             static_graph=static_graph,
         )
 
+        precision_dtype_map = {
+            "fp16": torch.float16,
+            "bf16": torch.bfloat16,
+            "fp32": torch.float32,
+        }
         self.zero_config = dict(
             reduce_bucket_size=zero_bucket_size_in_m * 1024 * 1024,
             communication_dtype=communication_dtype,
             overlap_communication=overlap_communication,
             cpu_offload=cpu_offload,
             partition_grad=(self.zero_stage == 2),
+            forced_dtype=precision_dtype_map[self.precision],
         )
 
         self.max_norm = max_norm

@@ -7,7 +7,7 @@ conda install pandas matplotlib xformers -c xformers -y
 
 # pip install
 echo "install pip packages"
-pip install transformers==4.31 datasets sentencepiece timm ninja packaging tensorboard==2.14.0
+pip install transformers==4.31 datasets sentencepiece timm ninja packaging tensorboard==2.14.0 wandb
 # flash attn
 echo "install flash attn"
 FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn==2.0.5 --no-build-isolation

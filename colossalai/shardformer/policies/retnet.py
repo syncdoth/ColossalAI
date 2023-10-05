@@ -218,6 +218,7 @@ class RetNetPolicy(Policy):
         held_layers = []
         layers_per_stage = self.distribute_layers(len(module.layers), stage_manager.num_stages)
         if stage_manager.is_first_stage():
+            held_layers.append(module.retnet_rel_pos)
             held_layers.append(module.embed_tokens)
         start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
         held_layers.extend(module.layers[start_idx:end_idx])
@@ -326,7 +327,7 @@ class RetNetForSequenceClassificationPolicy(RetNetPolicy):
             # set None as default
             self.set_pipeline_forward(
                 model_cls=RetNetForSequenceClassification,
-                new_forward=RetNetPipelineForwards.llama_for_sequence_classification_forward,
+                new_forward=RetNetPipelineForwards.retnet_for_sequence_classification_forward,
                 policy=policy,
             )
         return policy

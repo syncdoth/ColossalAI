@@ -1,3 +1,8 @@
+import os
+import sys
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
 import argparse
 import os
 import resource
@@ -9,15 +14,17 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from attn import SUPPORT_XFORMERS, replace_xformers
-from data_utils import load_json, prepare_dataloader, save_json
+from data_utils import load_json, prepare_dataloader, save_json, RandomDataset
 from datasets import load_dataset
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
+import wandb
 from tqdm import tqdm
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
-from transformers.models.llama.tokenization_llama import LlamaTokenizer
+from transformers import AutoTokenizer
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 import colossalai
 from colossalai.booster import Booster
@@ -28,10 +35,16 @@ from colossalai.nn.lr_scheduler import CosineAnnealingWarmupLR
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
 
-from .model_utils import format_numel_str, get_model_numel
+from model_utils import format_numel_str, get_model_numel
+
+# retnet
+from retnet.retnet.modeling_retnet import RetNetForCausalLM
+from retnet.retnet.configuration_retnet import RetNetConfig
+# from retnet.torchscale.retnet import TSRetNetForCausalLM
+# from retnet.torchscale.config import TSRetNetConfig
 
 
-MODEL_CONFIGS = {
+LLAMA_CONFIGS = {
     "7b": LlamaConfig(max_position_embeddings=4096),
     "13b": LlamaConfig(
         hidden_size=5120,
@@ -50,8 +63,14 @@ MODEL_CONFIGS = {
     ),
 }
 
+MODEL_CLASS = {
+    "llama": LlamaForCausalLM,
+    # "retnet_torchscale": TSRetNetForCausalLM,
+    "retnet_hf": RetNetForCausalLM,
+}
 
-def tokenize_batch_for_pretrain(batch, tokenizer: Optional[LlamaTokenizer] = None, max_length: int = 2048):
+
+def tokenize_batch_for_pretrain(batch, tokenizer: Optional[PreTrainedTokenizer] = None, max_length: int = 2048):
     texts = [sample["text"] for sample in batch]
     data = tokenizer(texts, return_tensors="pt", padding="max_length", truncation=True, max_length=max_length)
     data = {k: v.cuda() for k, v in data.items()}
@@ -105,12 +124,31 @@ def _criterion(outputs, inputs):
     return outputs.loss
 
 
+def get_config(model_name, config_name, **kwargs):
+    if model_name == "llama":
+        return LLAMA_CONFIGS[config_name]
+    elif model_name == "retnet_torchscale":
+        raise NotImplementedError
+        # with open(config_name, 'r') as f:
+        #     config = json.load(f)
+        # config.update(**kwargs)
+        # return TSRetNetConfig(**config)
+    elif model_name == "retnet_hf":
+        return RetNetConfig.from_pretrained(config_name, **kwargs)
+    else:
+        raise ValueError(f"Unknown model {model_name}")
+
+
 def main():
     # ==============================
     # Parse Arguments
     # ==============================
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config", type=str, default="7b", help="Model configuration")
+    parser.add_argument("-m", "--model_name", type=str, default="llama", choices=["llama", "retnet_hf"],  # TODO: "retnet_torchscale"
+                        help="which model to pretrain")
+    parser.add_argument("--tokenizer", type=str, default="meta-llama/Llama-2-7b-hf",
+                        help="which tokenizer to use")
     parser.add_argument(
         "-p",
         "--plugin",
@@ -121,20 +159,28 @@ def main():
     parser.add_argument(
         "-d", "--dataset", type=str, default="togethercomputer/RedPajama-Data-1T-Sample", help="Data set path"
     )
-    parser.add_argument("-e", "--num_epochs", type=int, default=1, help="Number of epochs")
-    parser.add_argument("-b", "--batch_size", type=int, default=2, help="Local batch size")
+    parser.add_argument("--max_iters", type=int, default=1e6, help="Max number of iterations")
+    parser.add_argument("-e", "--num_epochs", type=int, default=0, help="Number of epochs")
+    parser.add_argument("-b", "--batch_size", type=int, default=2048, help="Local batch size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("-w", "--weigth_decay", type=float, default=0.1, help="Weight decay")
+    parser.add_argument("-w", "--weight_decay", type=float, default=0.1, help="Weight decay")
     parser.add_argument("-s", "--warmup_steps", type=int, default=2000, help="Warmup steps")
     parser.add_argument("-g", "--grad_checkpoint", action="store_true", help="Use gradient checkpointing")
-    parser.add_argument("-l", "--max_length", type=int, default=4096, help="Max sequence length")
+    parser.add_argument("-l", "--block_size", type=int, default=2048, help="Max sequence length")
     parser.add_argument("-x", "--mixed_precision", default="fp16", choices=["fp16", "bf16"], help="Mixed precision")
     parser.add_argument("-i", "--save_interval", type=int, default=1000, help="Save interval")
     parser.add_argument("-o", "--save_dir", type=str, default="checkpoint", help="Checkpoint directory")
     parser.add_argument("-f", "--load", type=str, default=None, help="Load checkpoint")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping")
-    parser.add_argument("-t", "--tensorboard_dir", type=str, default="tb_logs", help="Tensorboard directory")
+    parser.add_argument("--wandb_dir", type=str, default="/home/opsai", help="wandb directory")
+    parser.add_argument("--run_name", type=str, default="retnet-3D", help="wandb run name")
     parser.add_argument("-a", "--flash_attention", action="store_true", help="Use Flash Attention")
+    # shardformer related
+    parser.add_argument("--tp", type=int, default=4, help="Tensor parallel size")
+    parser.add_argument("--pp", type=int, default=2, help="Pipeline parallel size")
+    parser.add_argument("--micro_batch_size", type=int, default=1024, help="Micro batch size")
+    parser.add_argument("--zero_stage", type=int, default=0, choices=[0, 1, 2], help="zero stage (0, 1, 2)")
+    parser.add_argument("--offload", action="store_true", help="Offload to CPU")
     args = parser.parse_args()
 
     # ==============================
@@ -163,14 +209,15 @@ def main():
     elif args.plugin == "hybrid_parallel":
         # modify the param accordingly, default configuration is for llama2-7b
         plugin = HybridParallelPlugin(
-            tp_size=4,
-            pp_size=2,
-            num_microbatches=None,
-            microbatch_size=1,
+            tp_size=args.tp,
+            pp_size=args.pp,
+            microbatch_size=args.micro_batch_size // coordinator.world_size,
             enable_jit_fused=False,
-            zero_stage=0,
-            precision="fp32",
-            initial_scale=1,
+            zero_stage=args.zero_stage,
+            precision=args.mixed_precision,
+            initial_scale=1,  # TODO or 2**8
+            cpu_offload=args.offload,
+            enable_fused_normalization=True,
         )
     else:
         raise ValueError(f"Unknown plugin {args.plugin}")
@@ -185,49 +232,88 @@ def main():
     # Initialize Tensorboard
     # ==============================
     if print_flag:
-        os.makedirs(args.tensorboard_dir, exist_ok=True)
-        writer = SummaryWriter(args.tensorboard_dir)
+        # os.makedirs(args.tensorboard_dir, exist_ok=True)
+        # writer = SummaryWriter(args.tensorboard_dir)
+        wandb_args = {
+            "project": "RetNet Chronicles",  # "iqmt1xcu"
+            "resume": False,  # "allow"
+            "dir": args.wandb_dir,
+            "config": args,
+            "mode": "disabled",
+            "name": args.run_name,
+            # "group": args.run_name,
+        }
+        wandb.init(**wandb_args)
 
     # ==============================
-    # Initialize Tokenizer, Dataset and Dataloader
+    # Initialize Tokenizer
     # ==============================
-    tokenizer = LlamaTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     # follows fast chat: https://github.com/lm-sys/FastChat/blob/main/fastchat/train/train.py#L257
-    tokenizer.pad_token = tokenizer.unk_token
-
-    dataset = load_dataset(args.dataset)
-    train_ds = dataset["train"]
-    dataloader = prepare_dataloader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=partial(tokenize_batch_for_pretrain, tokenizer=tokenizer, max_length=args.max_length),
-    )
+    # tokenizer.pad_token = tokenizer.unk_token
+    if not tokenizer.pad_token:
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    if not tokenizer.bos_token:
+        tokenizer.add_special_tokens({"pad_token": "<s>"})
 
     # ==============================
-    # Initialize Model, Optimizer and LR Scheduler
+    # Initialize Model, Optimizer
     # ==============================
-    config = MODEL_CONFIGS[args.config]
+    tokenizer_kwargs = {
+        "vocab_size": len(tokenizer),
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+    }
+    config = get_config(args.model_name, args.config, **tokenizer_kwargs)
+    model_class = MODEL_CLASS[args.model_name]
     # use lazy init when using GeminiPlugin
     init_ctx = (
         LazyInitContext(default_device=get_current_device()) if isinstance(plugin, GeminiPlugin) else nullcontext()
     )
 
     with init_ctx:
-        model = LlamaForCausalLM(config)
+        model = model_class(config)
 
     if args.grad_checkpoint:
         model.gradient_checkpointing_enable()
-    if args.flash_attention:
+    if args.flash_attention and not 'retnet' in args.model_name:
         assert SUPPORT_XFORMERS, "Use flash attention while xfomers is not installed"
         replace_xformers(model)
 
     model_numel = get_model_numel(model)
     coordinator.print_on_master(f"Model params: {format_numel_str(model_numel)}")
 
-    optimizer = HybridAdam(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weigth_decay)
-    total_step = args.num_epochs * len(dataloader)
+    optimizer = HybridAdam(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weight_decay, eps=1e-15)  # !!
+
+    # ==============================
+    # Initialize Data, DataLoader
+    # ==============================
+    # dataset = load_dataset(args.dataset)
+    # train_ds = dataset["train"]
+    if args.max_iters > 0:
+        total_step = args.max_iters
+        if args.num_epochs < 1:
+            args.num_epochs = args.max_iters // len(dataloader) + 1
+    else:
+        total_step = args.num_epochs * len(dataloader)
+
+    grad_accum_step = args.batch_size // args.micro_batch_size
+
+    # dp_size = plugin.dp_size if isinstance(plugin, HybridParallelPlugin) else coordinator.world_size
+    dataset = RandomDataset(
+        num_samples=args.micro_batch_size, max_length=args.block_size, vocab_size=config.vocab_size
+    )
+    train_ds = dataset
+    dataloader = prepare_dataloader(
+        train_ds,
+        batch_size=(args.batch_size if use_pipeline else args.micro_batch_size) // coordinator.world_size,
+        shuffle=True,
+        drop_last=True,
+        # collate_fn=partial(tokenize_batch_for_pretrain, tokenizer=tokenizer, max_length=args.block_size),
+    )
+    # ==============================
+    # Initialize LR Scheduler
+    # ==============================
     lr_scheduler = CosineAnnealingWarmupLR(
         optimizer, total_steps=total_step, warmup_steps=args.warmup_steps, eta_min=0.1 * args.lr
     )
@@ -275,10 +361,13 @@ def main():
                     )
                     loss = outputs["loss"]
                 else:
-                    batch = next(dataloader_iter)
-                    outputs = model(**batch)
-                    loss = outputs[0]
-                    booster.backward(loss, optimizer)
+                    accumulated_loss = 0
+                    for _ in range(grad_accum_step):
+                        batch = next(dataloader_iter)
+                        outputs = model(**batch)
+                        loss = outputs[0]
+                        accumulated_loss += loss
+                    booster.backward(accumulated_loss, optimizer)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -288,7 +377,11 @@ def main():
                     all_reduce_mean(loss)
                 if print_flag:
                     pbar.set_postfix({"loss": loss.item()})
-                    writer.add_scalar("loss", loss.item(), epoch * num_steps_per_epoch + step)
+                    # writer.add_scalar("loss", loss.item(), epoch * num_steps_per_epoch + step)
+                    wandb.log({
+                        "train_loss_per_batch": loss.item(),
+                        "lr": lr_scheduler.get_last_lr()[0],
+                    }, step=epoch * num_steps_per_epoch + step)
 
                 if args.save_interval > 0 and (step + 1) % args.save_interval == 0:
                     coordinator.print_on_master(f"Saving checkpoint")
@@ -301,9 +394,12 @@ def main():
                         step + 1,
                         args.batch_size,
                         coordinator,
-                        args.save_dir,
+                        os.path.join(args.save_dir, args.run_name),
                     )
                     coordinator.print_on_master(f"Saved checkpoint at epoch {epoch} step {step + 1}")
+
+                if epoch * num_steps_per_epoch + step >= args.max_iters:
+                    break
         # the continue epochs are not resumed, so we need to reset the sampler start index and start step
         dataloader.sampler.set_start_index(0)
         start_step = 0

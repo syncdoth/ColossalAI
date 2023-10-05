@@ -105,18 +105,20 @@ def save_json(data, file_path: str):
 
 
 class RandomDataset(Dataset):
-    def __init__(self, num_samples: int = 1000, max_length: int = 2048, vocab_size: int = 32000):
+    def __init__(self, num_samples: int = 1000, max_length: int = 2048, vocab_size: int = 32000, max_steps: int = 1000_000):
         self.num_samples = num_samples
         self.max_length = max_length
+        self.max_steps = max_steps
         self.input_ids = torch.randint(0, vocab_size, (num_samples, max_length), device=get_current_device())
         self.attention_mask = torch.ones_like(self.input_ids)
 
     def __len__(self):
-        return self.num_samples
+        return self.max_steps
 
     def __getitem__(self, idx):
+        i = idx % self.num_samples
         return {
-            "input_ids": self.input_ids[idx],
-            "attention_mask": self.attention_mask[idx],
-            "labels": self.input_ids[idx],
+            "input_ids": self.input_ids[i],
+            "attention_mask": self.attention_mask[i],
+            "labels": self.input_ids[i],
         }
