@@ -145,6 +145,7 @@ class OneForwardOneBackwardSchedule(PipelineSchedule):
         criterion: Callable,
         accum_loss: Optional[torch.Tensor] = None,
         outputs: Optional[List[Any]] = None,
+        **model_kwargs,
     ) -> Union[torch.Tensor, dict]:
         """Forward one step of the pipeline
 
@@ -161,7 +162,7 @@ class OneForwardOneBackwardSchedule(PipelineSchedule):
         micro_batch = self.load_micro_batch()
         # for the first stage, input_obj is None
         # for the non-first stage, input_obj is the output of the previous stage and it's must be a dict
-        output_obj = model_forward(model, micro_batch, input_obj)
+        output_obj = model_forward(model, micro_batch, input_obj, **model_kwargs)
         if self.stage_manager.is_last_stage():
             loss = criterion(output_obj, micro_batch) / self.num_microbatches
             if accum_loss is not None:
@@ -224,6 +225,7 @@ class OneForwardOneBackwardSchedule(PipelineSchedule):
         optimizer: Optional[OptimizerWrapper] = None,
         return_loss: bool = False,
         return_outputs: bool = False,
+        **model_kwargs,
     ) -> dict:
         """Runs non-interleaved 1F1B schedule, with communication between pipeline stages.
 
@@ -267,7 +269,7 @@ class OneForwardOneBackwardSchedule(PipelineSchedule):
         for i in range(num_warmup_microbatches):
             input_obj = self.recv_forward()
 
-            output_obj = self.forward_step(model, input_obj, criterion, accum_loss, outputs)
+            output_obj = self.forward_step(model, input_obj, criterion, accum_loss, outputs, **model_kwargs)
 
             self.send_forward(output_obj)
 
@@ -285,7 +287,7 @@ class OneForwardOneBackwardSchedule(PipelineSchedule):
         for i in range(num_microbatches_remaining):
             last_iteration = i == (num_microbatches_remaining - 1)
 
-            output_obj = self.forward_step(model, input_obj, criterion, accum_loss, outputs)
+            output_obj = self.forward_step(model, input_obj, criterion, accum_loss, outputs, **model_kwargs)
             if forward_only:
                 self.send_forward(output_obj)
 

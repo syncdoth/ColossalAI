@@ -174,6 +174,7 @@ class Booster:
         optimizer: Optional[Optimizer] = None,
         return_loss: bool = True,
         return_outputs: bool = False,
+        **model_kwargs,
     ) -> Dict[str, Any]:
         """
         Execute forward & backward when utilizing pipeline parallel.
@@ -202,7 +203,7 @@ class Booster:
         assert isinstance(
             self.plugin, PipelinePluginBase
         ), f"The plugin {self.plugin.__class__.__name__} does not support pipeline."
-        return self.plugin.execute_pipeline(data_iter, model, criterion, optimizer, return_loss, return_outputs)
+        return self.plugin.execute_pipeline(data_iter, model, criterion, optimizer, return_loss, return_outputs, **model_kwargs)
 
     def no_sync(self, model: nn.Module = None, optimizer: OptimizerWrapper = None) -> contextmanager:
         """Context manager to disable gradient synchronization across DP process groups.

@@ -50,8 +50,6 @@ class RetNetPolicy(Policy):
                 "retention.num_heads":
                     self.model.config.decoder_retention_heads //
                     self.shard_config.tensor_parallel_size,
-                "retnet_rel_pos.num_heads": self.model.config.decoder_retention_heads //
-                                            self.shard_config.tensor_parallel_size,
                 # for subln
                 "ffn.ffn_layernorm.normalized_shape": self.model.config.decoder_ffn_embed_dim // self.shard_config.tensor_parallel_size,
                 "ffn.ffn_layernorm.elementwise_affine": False,  # TODO: this should be true.

@@ -101,7 +101,7 @@ def get_micro_batch(batch: Any, start: int, micro_batch_size: int) -> Any:
     return tree_map(_get_tensor_slice, batch)
 
 
-def model_forward(model: Module, data: Any, internal_inputs: Optional[dict]) -> Any:
+def model_forward(model: Module, data: Any, internal_inputs: Optional[dict], **model_kwargs) -> Any:
     """Call model forward function with data and internal inputs.
 
     Args:
@@ -115,10 +115,10 @@ def model_forward(model: Module, data: Any, internal_inputs: Optional[dict]) -> 
     if internal_inputs is None:
         internal_inputs = {}
     if isinstance(data, (list, tuple)):
-        return model(*data, **internal_inputs)
+        return model(*data, **internal_inputs, **model_kwargs)
     elif isinstance(data, dict):
-        return model(**data, **internal_inputs)
-    return model(data, **internal_inputs)
+        return model(**data, **internal_inputs, **model_kwargs)
+    return model(data, **internal_inputs, **model_kwargs)
 
 
 def retain_grad(x: Any) -> None:
