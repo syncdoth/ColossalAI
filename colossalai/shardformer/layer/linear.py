@@ -483,7 +483,8 @@ class LinearIdentity_Col(ParallelModule):
 
         # Parameters.
         factory_kwargs = {"device": device, "dtype": torch.float}
-        self.weight = Parameter(torch.eye(self.out_features, self.out_features, **factory_kwargs).to(dtype))
+        self.weight = Parameter(torch.eye(self.out_features, self.out_features, **factory_kwargs).to(dtype),
+                                requires_grad=False)
 
         if not is_distributed_tensor(self.weight):
             sharded_weight = shard_rowwise(self.weight.data, self.process_group)

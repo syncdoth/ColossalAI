@@ -73,6 +73,10 @@ class RetNetPolicy(Policy):
                     target_module=Linear1D_Col,
                 ),
                 SubModuleReplacementDescription(
+                    suffix="retention.decay_proj",
+                    target_module=LinearIdentity_Col,
+                ),
+                SubModuleReplacementDescription(
                     suffix="retention.out_proj",
                     target_module=Linear1D_Row,
                 ),
@@ -106,10 +110,6 @@ class RetNetPolicy(Policy):
                     SubModuleReplacementDescription(
                         suffix="embed_tokens",
                         target_module=VocabParallelEmbedding1D,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="retnet_rel_pos.proj",
-                        target_module=LinearIdentity_Col,
                     ),
                 ],
                 policy=policy,
@@ -216,8 +216,8 @@ class RetNetPolicy(Policy):
         held_layers = []
         layers_per_stage = self.distribute_layers(len(module.layers), stage_manager.num_stages)
         if stage_manager.is_first_stage():
-            held_layers.append(module.retnet_rel_pos)
             held_layers.append(module.embed_tokens)
+            held_layers.append(module.retnet_rel_pos)
         start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():

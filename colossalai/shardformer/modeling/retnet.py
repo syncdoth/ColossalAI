@@ -31,7 +31,7 @@ class RetNetPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        pre_retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -76,11 +76,11 @@ class RetNetPipelineForwards:
             hidden_states = inputs_embeds
 
             # relative position
-            retention_rel_pos = self.retnet_rel_pos(seq_length,
-                                                    forward_impl=forward_impl,
-                                                    recurrent_chunk_size=recurrent_chunk_size,
-                                                    retention_mask=retention_mask,
-                                                    retention_rel_pos=pre_retention_rel_pos)
+            if retention_rel_pos is None:
+                retention_rel_pos = self.retnet_rel_pos(seq_length,
+                                                        forward_impl=forward_impl,
+                                                        recurrent_chunk_size=recurrent_chunk_size,
+                                                        retention_mask=retention_mask)
         else:
             input_shape = hidden_states.shape[:-1]
             batch_size, seq_length = input_shape
@@ -276,7 +276,7 @@ class RetNetPipelineForwards:
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            pre_retention_rel_pos=pre_retention_rel_pos,
+            retention_rel_pos=pre_retention_rel_pos,
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,
