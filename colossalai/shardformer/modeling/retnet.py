@@ -31,7 +31,7 @@ class RetNetPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
+        pre_retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -80,7 +80,7 @@ class RetNetPipelineForwards:
                                                     forward_impl=forward_impl,
                                                     recurrent_chunk_size=recurrent_chunk_size,
                                                     retention_mask=retention_mask,
-                                                    retention_rel_pos=retention_rel_pos)
+                                                    retention_rel_pos=pre_retention_rel_pos)
         else:
             input_shape = hidden_states.shape[:-1]
             batch_size, seq_length = input_shape
@@ -211,7 +211,7 @@ class RetNetPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
+        pre_retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -276,7 +276,7 @@ class RetNetPipelineForwards:
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            retention_rel_pos=retention_rel_pos,
+            pre_retention_rel_pos=pre_retention_rel_pos,
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,

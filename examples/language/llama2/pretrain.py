@@ -322,13 +322,13 @@ def main():
     # ==============================
     # during pretrain, seqlen is fixed. So we can get relpos first.
     # ==============================
-    retention_rel_pos = model.model.retnet_rel_pos(
+    pre_retention_rel_pos = model.model.retnet_rel_pos(
         args.block_size,
         forward_impl='parallel',
         get_decay_scale=False,
     )
     retention_rel_pos_device = []
-    for rel_pos_group in retention_rel_pos:
+    for rel_pos_group in pre_retention_rel_pos:
         group = []
         for rel_pos in rel_pos_group:
             if rel_pos is not None:
@@ -336,7 +336,7 @@ def main():
                 rel_pos = rel_pos.to(default_dtype)
             group.append(rel_pos)
         retention_rel_pos_device.append(tuple(group))
-    retention_rel_pos = tuple(retention_rel_pos_device)
+    pre_retention_rel_pos = tuple(retention_rel_pos_device)
     # ==============================
 
     model, optimizer, _, dataloader, lr_scheduler = booster.boost(
@@ -378,14 +378,14 @@ def main():
                 if use_pipeline:
                     outputs = booster.execute_pipeline(
                         dataloader_iter, model, _criterion, optimizer, return_loss=True, return_outputs=True,
-                        retention_rel_pos=retention_rel_pos,
+                        pre_retention_rel_pos=pre_retention_rel_pos,
                     )
                     loss = outputs["loss"]
                 else:
                     accumulated_loss = 0
                     for _ in range(grad_accum_step):
                         batch = next(dataloader_iter)
-                        outputs = model(**batch, retention_rel_pos=retention_rel_pos)
+                        outputs = model(**batch, pre_retention_rel_pos=pre_retention_rel_pos)
                         loss = outputs[0]
                         accumulated_loss += loss
                     booster.backward(accumulated_loss, optimizer)
