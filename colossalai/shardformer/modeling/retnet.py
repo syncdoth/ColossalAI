@@ -46,6 +46,19 @@ class RetNetPipelineForwards:
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        if retention_mask is None and attention_mask is not None:
+            retention_mask = attention_mask
+
+        if retention_mask is not None and forward_impl == 'recurrent':
+            retention_mask = retention_mask[:, -1:]
+
+        if forward_impl != 'parallel':
+            logger.warning_once(
+                f"Currently only forward_impl='parallel' is supported. "
+                f"Setting forward_impl={forward_impl}..."
+            )
+            forward_impl = 'parallel'
+
         # retrieve input_ids and inputs_embeds
         if stage_manager.is_first_stage():
             if input_ids is not None and inputs_embeds is not None:
@@ -60,6 +73,14 @@ class RetNetPipelineForwards:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             if inputs_embeds is None:
                 inputs_embeds = self.forward_embedding(input_ids, forward_impl, inputs_embeds, past_key_values)
+            hidden_states = inputs_embeds
+
+            # relative position
+            retention_rel_pos = self.retnet_rel_pos(seq_length,
+                                                    forward_impl=forward_impl,
+                                                    recurrent_chunk_size=recurrent_chunk_size,
+                                                    retention_mask=retention_mask,
+                                                    retention_rel_pos=retention_rel_pos)
         else:
             input_shape = hidden_states.shape[:-1]
             batch_size, seq_length = input_shape
@@ -68,13 +89,6 @@ class RetNetPipelineForwards:
         seq_length_with_past = seq_length
         past_key_values_length = 0
 
-        if retention_mask is None and attention_mask is not None:
-            retention_mask = attention_mask
-
-        if retention_mask is not None and forward_impl == 'recurrent':
-            retention_mask = retention_mask[:, -1:]
-
-        hidden_states = inputs_embeds
 
         # TODO(jianghai): left the recording kv-value tensors as () or None type, this feature may be added in the future.
         if output_retentions:
@@ -112,23 +126,6 @@ class RetNetPipelineForwards:
                 )
                 use_cache = False
 
-        # handling chunking here
-        if recurrent_chunk_size is None:
-            recurrent_chunk_size = self.recurrent_chunk_size
-        need_pad_for_chunkwise = (forward_impl == 'chunkwise' and
-                                  seq_length % recurrent_chunk_size != 0)
-        if need_pad_for_chunkwise:
-            padding_len = recurrent_chunk_size - seq_length % recurrent_chunk_size
-            slen = seq_length + padding_len
-            hidden_states = F.pad(hidden_states, (0, 0, 0, padding_len))
-        else:
-            slen = seq_length
-        # relative position
-        retention_rel_pos = self.retnet_rel_pos(slen,
-                                                forward_impl=forward_impl,
-                                                recurrent_chunk_size=recurrent_chunk_size,
-                                                retention_mask=retention_mask,
-                                                retention_rel_pos=retention_rel_pos)
 
         # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -176,9 +173,6 @@ class RetNetPipelineForwards:
                 all_retentions += (layer_outputs[2],)
 
         next_cache = next_decoder_cache if use_cache else None
-
-        if need_pad_for_chunkwise:
-            hidden_states = hidden_states[:, :seq_length, :]
 
         if stage_manager.is_last_stage() and self.layer_norm is not None:
             hidden_states = self.layer_norm(hidden_states)
