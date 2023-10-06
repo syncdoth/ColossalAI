@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn import Module
 
-from colossalai.shardformer.layer import FusedRMSNorm, FusedLayerNorm, Linear1D_Col, Linear1D_Row, VocabParallelEmbedding1D
+from colossalai.shardformer.layer import FusedRMSNorm, FusedLayerNorm, Linear1D_Col, Linear1D_Row, LinearIdentity_Col, VocabParallelEmbedding1D
 
 from ..modeling.retnet import RetNetPipelineForwards
 from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
@@ -109,7 +109,7 @@ class RetNetPolicy(Policy):
                     ),
                     SubModuleReplacementDescription(
                         suffix="retnet_rel_pos.proj",
-                        target_module=Linear1D_Col,
+                        target_module=LinearIdentity_Col,
                     ),
                 ],
                 policy=policy,
