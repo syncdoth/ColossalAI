@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -31,6 +31,7 @@ class RetNetPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -126,7 +127,8 @@ class RetNetPipelineForwards:
         retention_rel_pos = self.retnet_rel_pos(slen,
                                                 forward_impl=forward_impl,
                                                 recurrent_chunk_size=recurrent_chunk_size,
-                                                retention_mask=retention_mask)
+                                                retention_mask=retention_mask,
+                                                retention_rel_pos=retention_rel_pos)
 
         # start running through the decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -215,6 +217,7 @@ class RetNetPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        retention_rel_pos: Optional[Tuple[torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -279,6 +282,7 @@ class RetNetPipelineForwards:
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            retention_rel_pos=retention_rel_pos,
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,
