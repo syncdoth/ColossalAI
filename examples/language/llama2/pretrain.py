@@ -306,9 +306,10 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    data_loader.create_dataloader_decoder(batch_size=dataloader_batch_size, block_size=args.block_size,
-                                          tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-                                          meta_collate_fn=tokenize_batch_for_pretrain)
+    dataloader = data_loader.create_dataloader_decoder(
+        batch_size=dataloader_batch_size, block_size=args.block_size,
+        tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+        meta_collate_fn=tokenize_batch_for_pretrain)
     # TODO: distributed sampler error
     # dataloader = prepare_dataloader(
     #     train_ds,
@@ -327,7 +328,7 @@ def main():
     # Initialize LR Scheduler
     # ==============================
     lr_scheduler = get_lr_scheduler(optimizer, optim_name='adamw', warmup_steps=args.warmup_steps,
-                                    base_lr=args.lr, min_lr=0.1 * args.lr)
+                                    base_lr=args.lr, min_lr=0.1 * args.lr, total_steps=total_step)
     default_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
     torch.set_default_dtype(default_dtype)
     # ==============================
