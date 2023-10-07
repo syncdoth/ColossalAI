@@ -40,8 +40,6 @@ from model_utils import format_numel_str, get_model_numel
 # retnet
 from retnet.retnet.modeling_retnet import RetNetForCausalLM
 from retnet.retnet.configuration_retnet import RetNetConfig
-# from retnet.torchscale.retnet import TSRetNetForCausalLM
-# from retnet.torchscale.config import TSRetNetConfig
 
 
 LLAMA_CONFIGS = {
@@ -65,8 +63,7 @@ LLAMA_CONFIGS = {
 
 MODEL_CLASS = {
     "llama": LlamaForCausalLM,
-    # "retnet_torchscale": TSRetNetForCausalLM,
-    "retnet_hf": RetNetForCausalLM,
+    "retnet": RetNetForCausalLM,
 }
 
 
@@ -127,13 +124,7 @@ def _criterion(outputs, inputs):
 def get_config(model_name, config_name, **kwargs):
     if model_name == "llama":
         return LLAMA_CONFIGS[config_name]
-    elif model_name == "retnet_torchscale":
-        raise NotImplementedError
-        # with open(config_name, 'r') as f:
-        #     config = json.load(f)
-        # config.update(**kwargs)
-        # return TSRetNetConfig(**config)
-    elif model_name == "retnet_hf":
+    elif model_name == "retnet":
         return RetNetConfig.from_pretrained(config_name, **kwargs)
     else:
         raise ValueError(f"Unknown model {model_name}")
@@ -145,7 +136,7 @@ def main():
     # ==============================
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config", type=str, default="7b", help="Model configuration")
-    parser.add_argument("-m", "--model_name", type=str, default="llama", choices=["llama", "retnet_hf"],  # TODO: "retnet_torchscale"
+    parser.add_argument("-m", "--model_name", type=str, default="llama", choices=["llama", "retnet"],
                         help="which model to pretrain")
     parser.add_argument("--tokenizer", type=str, default="meta-llama/Llama-2-7b-hf",
                         help="which tokenizer to use")
