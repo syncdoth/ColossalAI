@@ -23,6 +23,7 @@ from tqdm import tqdm
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers import AutoTokenizer
+from accelerate import Accelerator
 
 import colossalai
 from colossalai.booster import Booster
@@ -310,6 +311,14 @@ def main():
         batch_size=dataloader_batch_size, block_size=args.block_size,
         tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
         meta_collate_fn=tokenize_batch_for_pretrain)
+
+    # TODO: use accelerator just for data prepare...
+    accelerator = Accelerator(
+        gradient_accumulation_steps=grad_accum_step,
+        split_batches=True,
+    )
+    dataloader = accelerator.prepare(dataloader)
+
     # TODO: distributed sampler error
     # dataloader = prepare_dataloader(
     #     train_ds,
