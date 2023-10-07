@@ -373,9 +373,9 @@ def main():
     num_steps_per_epoch = len(dataloader)
 
     # if resume training, set the sampler start index to the correct value
-    dataloader.sampler.set_start_index(sampler_start_idx)
+    # dataloader.sampler.set_start_index(sampler_start_idx)
     for epoch in range(start_epoch, args.num_epochs):
-        dataloader.sampler.set_epoch(epoch)
+        # dataloader.sampler.set_epoch(epoch)
         step_nums = num_steps_per_epoch - start_step
         dataloader_iter = iter(dataloader)
 
@@ -431,7 +431,7 @@ def main():
                 if epoch * num_steps_per_epoch + step >= args.max_iters:
                     break
         # the continue epochs are not resumed, so we need to reset the sampler start index and start step
-        dataloader.sampler.set_start_index(0)
+        # dataloader.sampler.set_start_index(0)
         start_step = 0
 
     coordinator.print_on_master(f"Max CUDA memory usage: {torch.cuda.max_memory_allocated()/1024**2:.2f} MB")
