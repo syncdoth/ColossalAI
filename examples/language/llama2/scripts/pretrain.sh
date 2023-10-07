@@ -18,9 +18,9 @@ colossalai run --nproc_per_node 8 --hostfile $HOSTFILE pretrain.py \
     --model_name retnet \
     --tokenizer meta-llama/Llama-2-7b-hf \
     --plugin hybrid_parallel \
-    --num_epochs 10 \
     --batch_size 2048 \
-    --micro_batch_size 1024 \
+    --micro_batch_size 2048 \
+    --num_pp_mbs 2 \
     --block_size 2048 \
     --max_iters 1000000 \
     --lr 3e-4 \
@@ -31,7 +31,7 @@ colossalai run --nproc_per_node 8 --hostfile $HOSTFILE pretrain.py \
     --save_interval 5000 \
     --save_dir /nfs/data_mount/checkpoints \
     --run_name retnet-1.3b-glu-tok-llama-3d-parallel \
-    --tp 4 --pp 2 --zero_stage 1 --offload
+    --tp 8 --pp 2 --zero_stage 1 --offload
     # --load CKPT PATH
     # epoch -> max iter TODO
     # --dataset wikipedia # TODO

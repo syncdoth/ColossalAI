@@ -169,7 +169,8 @@ def main():
     # shardformer related
     parser.add_argument("--tp", type=int, default=4, help="Tensor parallel size")
     parser.add_argument("--pp", type=int, default=2, help="Pipeline parallel size")
-    parser.add_argument("--micro_batch_size", type=int, default=1024, help="Micro batch size")
+    parser.add_argument("--num_pp_mbs", type=int, default=2, help="Number of micro batches in pipeline parallel")
+    parser.add_argument("--micro_batch_size", type=int, default=1024, help="Micro batch size (related to grad accum)")
     parser.add_argument("--zero_stage", type=int, default=0, choices=[0, 1, 2], help="zero stage (0, 1, 2)")
     parser.add_argument("--offload", action="store_true", help="Offload to CPU")
     args = parser.parse_args()
@@ -179,6 +180,19 @@ def main():
     # ==============================
     colossalai.launch_from_torch({})
     coordinator = DistCoordinator()
+
+    # ==============================
+    # compute batch size correctly
+    # ==============================
+    grad_accum_step = args.batch_size // args.micro_batch_size
+    assert grad_accum_step == 1, "grad_accum_step must be 1 for now"
+
+    if args.pp > 1:
+        per_device_batch_size = args.micro_batch_size // (coordinator.world_size * args.num_pp_mbs)
+        dataloader_batch_size = per_device_batch_size * args.num_pp_mbs
+    else:
+        per_device_batch_size = args.micro_batch_size // coordinator.world_size
+        dataloader_batch_size = per_device_batch_size
 
     # ==============================
     # Initialize Booster
@@ -202,7 +216,7 @@ def main():
         plugin = HybridParallelPlugin(
             tp_size=args.tp,
             pp_size=args.pp,
-            microbatch_size=args.micro_batch_size // coordinator.world_size,
+            num_microbatches=args.num_pp_mbs,
             enable_jit_fused=False,
             zero_stage=args.zero_stage,
             precision=args.mixed_precision,
@@ -263,7 +277,7 @@ def main():
     )
 
     with init_ctx:
-        model = model_class(config)
+        model = model_class(config, tensor_parallel=args.tp > 1)
 
     if args.grad_checkpoint:
         model.gradient_checkpointing_enable()
@@ -281,27 +295,23 @@ def main():
     # ==============================
     # dataset = load_dataset(args.dataset)
     # train_ds = dataset["train"]
-    if args.max_iters > 0:
-        total_step = args.max_iters
-        if args.num_epochs < 1:
-            args.num_epochs = args.max_iters // len(dataloader) + 1
-    else:
-        total_step = args.num_epochs * len(dataloader)
-
-    grad_accum_step = args.batch_size // args.micro_batch_size
-
-    # dp_size = plugin.dp_size if isinstance(plugin, HybridParallelPlugin) else coordinator.world_size
     dataset = RandomDataset(
-        num_samples=args.micro_batch_size, max_length=args.block_size, vocab_size=config.vocab_size
+        num_samples=dataloader_batch_size, max_length=args.block_size, vocab_size=config.vocab_size
     )
     train_ds = dataset
     dataloader = prepare_dataloader(
         train_ds,
-        batch_size=(args.batch_size if use_pipeline else args.micro_batch_size) // coordinator.world_size,
+        batch_size=dataloader_batch_size,
         shuffle=True,
         drop_last=True,
         # collate_fn=partial(tokenize_batch_for_pretrain, tokenizer=tokenizer, max_length=args.block_size),
     )
+    if args.max_iters > 0:
+        total_step = args.max_iters
+        coordinator.print_on_master("if max_iters set, ignore num_epochs")
+        args.num_epochs = args.max_iters // len(dataloader) + 1
+    else:
+        total_step = args.num_epochs * len(dataloader)
     # ==============================
     # Initialize LR Scheduler
     # ==============================
@@ -373,13 +383,10 @@ def main():
                     )
                     loss = outputs["loss"]
                 else:
-                    accumulated_loss = 0
-                    for _ in range(grad_accum_step):
-                        batch = next(dataloader_iter)
-                        outputs = model(**batch, pre_retention_rel_pos=pre_retention_rel_pos)
-                        loss = outputs[0]
-                        accumulated_loss += loss
-                    booster.backward(accumulated_loss, optimizer)
+                    batch = next(dataloader_iter)
+                    outputs = model(**batch, pre_retention_rel_pos=pre_retention_rel_pos)
+                    loss = outputs[0]
+                    booster.backward(loss, optimizer)
 
                 optimizer.step()
                 lr_scheduler.step()
