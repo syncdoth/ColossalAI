@@ -14,8 +14,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from attn import SUPPORT_XFORMERS, replace_xformers
-from data_utils import load_json, prepare_dataloader, save_json, RandomDataset
-from datasets import load_dataset
+from data_utils import load_json, prepare_dataloader, save_json
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 # from torch.utils.tensorboard import SummaryWriter
@@ -24,7 +23,6 @@ from tqdm import tqdm
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers import AutoTokenizer
-from transformers.tokenization_utils import PreTrainedTokenizer
 
 import colossalai
 from colossalai.booster import Booster
@@ -41,6 +39,9 @@ from model_utils import format_numel_str, get_model_numel
 from retnet.retnet.modeling_retnet import RetNetForCausalLM
 from retnet.retnet.configuration_retnet import RetNetConfig
 
+# nucleus
+from nucleus import data_loader
+from nucleus.utils import get_lr_scheduler
 
 LLAMA_CONFIGS = {
     "7b": LlamaConfig(max_position_embeddings=4096),
@@ -67,11 +68,13 @@ MODEL_CLASS = {
 }
 
 
-def tokenize_batch_for_pretrain(batch, tokenizer: Optional[PreTrainedTokenizer] = None, max_length: int = 2048):
-    texts = [sample["text"] for sample in batch]
-    data = tokenizer(texts, return_tensors="pt", padding="max_length", truncation=True, max_length=max_length)
-    data = {k: v.cuda() for k, v in data.items()}
-    data["labels"] = data["input_ids"].clone()
+def tokenize_batch_for_pretrain(collate_fn, batch):
+    input_ids, labels, attention_mask = collate_fn(batch)
+    data = {
+        "input_ids": input_ids.cuda(),
+        "attention_mask": attention_mask.cuda(),
+        "labels": labels.cuda(),
+    }
     return data
 
 
@@ -147,9 +150,6 @@ def main():
         default="gemini",
         help="Choose which plugin to use",
     )
-    parser.add_argument(
-        "-d", "--dataset", type=str, default="togethercomputer/RedPajama-Data-1T-Sample", help="Data set path"
-    )
     parser.add_argument("--max_iters", type=int, default=1e6, help="Max number of iterations")
     parser.add_argument("-e", "--num_epochs", type=int, default=0, help="Number of epochs")
     parser.add_argument("-b", "--batch_size", type=int, default=2048, help="Local batch size")
@@ -173,7 +173,20 @@ def main():
     parser.add_argument("--micro_batch_size", type=int, default=1024, help="Micro batch size (related to grad accum)")
     parser.add_argument("--zero_stage", type=int, default=0, choices=[0, 1, 2], help="zero stage (0, 1, 2)")
     parser.add_argument("--offload", action="store_true", help="Offload to CPU")
+    # data
+    parser.add_argument("--datasets", type=str, default="wikipedia", help="comma-separated list of dataset names")
+    parser.add_argument("--dataset_weights", type=str, default=None, help="comma-separated list of dataset weights")
     args = parser.parse_args()
+
+    # ==============================
+    # Parse comma-separated Arguments
+    # ==============================
+    args.datasets = args.datasets.split(",")
+    if args.dataset_weights is not None:
+        args.dataset_weights = tuple(float(x) for x in args.dataset_weights.split(","))
+        assert (
+            len(args.datasets) == len(args.dataset_weights)
+        ), "expected equal number of dataset names and weights"
 
     # ==============================
     # Initialize Distributed Training
@@ -293,19 +306,17 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    # dataset = load_dataset(args.dataset)
-    # train_ds = dataset["train"]
-    dataset = RandomDataset(
-        num_samples=dataloader_batch_size, max_length=args.block_size, vocab_size=config.vocab_size
-    )
-    train_ds = dataset
-    dataloader = prepare_dataloader(
-        train_ds,
-        batch_size=dataloader_batch_size,
-        shuffle=True,
-        drop_last=True,
-        # collate_fn=partial(tokenize_batch_for_pretrain, tokenizer=tokenizer, max_length=args.block_size),
-    )
+    data_loader.create_dataloader_decoder(batch_size=dataloader_batch_size, block_size=args.block_size,
+                                          tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+                                          meta_collate_fn=tokenize_batch_for_pretrain)
+    # TODO: distributed sampler error
+    # dataloader = prepare_dataloader(
+    #     train_ds,
+    #     batch_size=dataloader_batch_size,
+    #     shuffle=True,
+    #     drop_last=True,
+    #     collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
+    # )
     if args.max_iters > 0:
         total_step = args.max_iters
         coordinator.print_on_master("if max_iters set, ignore num_epochs")
@@ -315,9 +326,8 @@ def main():
     # ==============================
     # Initialize LR Scheduler
     # ==============================
-    lr_scheduler = CosineAnnealingWarmupLR(
-        optimizer, total_steps=total_step, warmup_steps=args.warmup_steps, eta_min=0.1 * args.lr
-    )
+    lr_scheduler = get_lr_scheduler(optimizer, optim_name='adamw', warmup_steps=args.warmup_steps,
+                                    base_lr=args.lr, min_lr=0.1 * args.lr)
     default_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
     torch.set_default_dtype(default_dtype)
     # ==============================
