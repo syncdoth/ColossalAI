@@ -411,7 +411,7 @@ def main():
                     loss = outputs["loss"]
                 else:
                     batch = next(dataloader_iter)
-                    outputs = model(**batch, pre_retention_rel_pos=pre_retention_rel_pos)
+                    outputs = model(**batch, retention_rel_pos=pre_retention_rel_pos)
                     loss = outputs[0]
                     booster.backward(loss, optimizer)
 

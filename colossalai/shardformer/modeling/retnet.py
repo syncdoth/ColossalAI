@@ -80,7 +80,8 @@ class RetNetPipelineForwards:
                 retention_rel_pos = self.retnet_rel_pos(seq_length,
                                                         forward_impl=forward_impl,
                                                         recurrent_chunk_size=recurrent_chunk_size,
-                                                        retention_mask=retention_mask)
+                                                        retention_mask=retention_mask,
+                                                        get_decay_scale=not self.training)
         else:
             input_shape = hidden_states.shape[:-1]
             batch_size, seq_length = input_shape
