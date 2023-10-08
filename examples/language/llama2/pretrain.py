@@ -317,7 +317,7 @@ def main():
         gradient_accumulation_steps=grad_accum_step,
         split_batches=True,
     )
-    dataloader = accelerator.prepare(dataloader)
+    dataloader = accelerator.prepare(dataloader)[0]
 
     # TODO: distributed sampler error
     # dataloader = prepare_dataloader(
