@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import _get_default_group
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
 
 from colossalai.utils import get_current_device
 
@@ -85,7 +85,7 @@ def prepare_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        sampler=sampler,
+        sampler=sampler if not isinstance(dataset, IterableDataset) else None,
         worker_init_fn=seed_worker,
         drop_last=drop_last,
         pin_memory=pin_memory,

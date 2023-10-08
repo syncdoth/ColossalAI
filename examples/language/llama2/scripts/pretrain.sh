@@ -34,5 +34,3 @@ sudo -E env "PATH=$PATH" colossalai run --nproc_per_node 8 --hostfile $HOSTFILE 
     --tp 2 --pp 1 --zero_stage 2 --offload \
     --datasets refinedweb --dataset_weights 1
     # --load CKPT PATH
-    # epoch -> max iter TODO
-    # --dataset wikipedia # TODO
