@@ -23,7 +23,7 @@ from tqdm import tqdm
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers import AutoTokenizer
-from accelerate import Accelerator
+# from accelerate import Accelerator
 
 import colossalai
 from colossalai.booster import Booster
@@ -42,7 +42,7 @@ from retnet.retnet.configuration_retnet import RetNetConfig
 
 # nucleus
 from nucleus import data_loader
-from nucleus.utils import get_lr_scheduler
+from nucleus.utils import get_lr_scheduler, init_dataloader_decoder_utils
 
 LLAMA_CONFIGS = {
     "7b": LlamaConfig(max_position_embeddings=4096),
@@ -307,26 +307,33 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    dataloader = data_loader.create_dataloader_decoder(
-        batch_size=dataloader_batch_size, block_size=args.block_size,
-        tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-        meta_collate_fn=tokenize_batch_for_pretrain)
+    # dataloader = data_loader.create_dataloader_decoder(
+    #     batch_size=dataloader_batch_size, block_size=args.block_size,
+    #     tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+    #     meta_collate_fn=tokenize_batch_for_pretrain)
 
     # TODO: use accelerator just for data prepare...
-    accelerator = Accelerator(
-        gradient_accumulation_steps=grad_accum_step,
-        split_batches=True,
-    )
-    dataloader = accelerator.prepare(dataloader)[0]
-
-    # TODO: distributed sampler error
-    # dataloader = prepare_dataloader(
-    #     train_ds,
-    #     batch_size=dataloader_batch_size,
-    #     shuffle=True,
-    #     drop_last=True,
-    #     collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
+    # accelerator = Accelerator(
+    #     gradient_accumulation_steps=grad_accum_step,
+    #     split_batches=True,
     # )
+    # dataloader = accelerator.prepare(dataloader)[0]
+
+    tokenizer, collate_fn = init_dataloader_decoder_utils(
+        padding="longest", max_length=args.block_size, tokenizer=tokenizer,
+    )
+
+    train_ds = data_loader.CombinedDataset_decoder(
+        block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights
+    )
+    # TODO: distributed sampler error
+    dataloader = prepare_dataloader(
+        train_ds,
+        batch_size=dataloader_batch_size,
+        shuffle=True,
+        drop_last=True,
+        collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
+    )
     if args.max_iters > 0:
         total_step = args.max_iters
         coordinator.print_on_master("if max_iters set, ignore num_epochs")
