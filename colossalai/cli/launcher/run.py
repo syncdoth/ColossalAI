@@ -141,11 +141,20 @@ def get_launch_command(
                 ret.append(f"--{k}")
         return ret
 
+    add_sudo = False
+    sudo_password = ""
     if extra_launch_args:
         extra_launch_args_dict = dict()
         for arg in extra_launch_args.split(","):
+            if arg == 'add_sudo':
+                add_sudo = True
+                continue
             if "=" in arg:
                 k, v = arg.split("=")
+                if k == 'sudo_password':
+                    add_sudo = True
+                    sudo_password = v
+                    continue
                 extra_launch_args_dict[k] = v
             else:
                 extra_launch_args_dict[arg] = None
@@ -200,6 +209,8 @@ def get_launch_command(
 
     cmd += _arg_dict_to_list(extra_launch_args) + [user_script] + user_args
     cmd = " ".join(cmd)
+    if add_sudo:
+        cmd = f'echo "{sudo_password}" | sudo -S -E env "PATH=$PATH" {cmd}'
     return cmd
 
 
