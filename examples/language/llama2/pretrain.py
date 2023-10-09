@@ -314,7 +314,7 @@ def main():
     # TODO: use accelerator just for data prepare...
     accelerator = Accelerator(
         gradient_accumulation_steps=grad_accum_step,
-        split_batches=True,
+        split_batches=False,
     )
     dataloader = accelerator.prepare_data_loader(dataloader)
 
