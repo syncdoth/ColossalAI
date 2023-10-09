@@ -23,14 +23,13 @@ from tqdm import tqdm
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers import AutoTokenizer
-# from accelerate import Accelerator
+from accelerate import Accelerator
 
 import colossalai
 from colossalai.booster import Booster
 from colossalai.booster.plugin import GeminiPlugin, HybridParallelPlugin, LowLevelZeroPlugin
 from colossalai.cluster import DistCoordinator
 from colossalai.lazy import LazyInitContext
-from colossalai.nn.lr_scheduler import CosineAnnealingWarmupLR
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
 
@@ -259,8 +258,8 @@ def main():
             "dir": args.wandb_dir,
             "config": args,
             "mode": "disabled",
-            "name": args.run_name,
-            # "group": args.run_name,
+            "name": args.run_name + f"-{coordinator.rank}",
+            "group": args.run_name,
         }
         wandb.init(**wandb_args)
 
@@ -307,33 +306,34 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    # dataloader = data_loader.create_dataloader_decoder(
-    #     batch_size=dataloader_batch_size, block_size=args.block_size,
-    #     tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-    #     meta_collate_fn=tokenize_batch_for_pretrain)
+    dataloader = data_loader.create_dataloader_decoder(
+        batch_size=dataloader_batch_size, block_size=args.block_size,
+        tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+        meta_collate_fn=tokenize_batch_for_pretrain)
 
     # TODO: use accelerator just for data prepare...
-    # accelerator = Accelerator(
-    #     gradient_accumulation_steps=grad_accum_step,
-    #     split_batches=True,
+    accelerator = Accelerator(
+        gradient_accumulation_steps=grad_accum_step,
+        split_batches=True,
+    )
+    dataloader = accelerator.prepare_data_loader(dataloader)
+
+    # tokenizer, collate_fn = init_dataloader_decoder_utils(
+    #     padding="longest", max_length=args.block_size, tokenizer=tokenizer,
     # )
-    # dataloader = accelerator.prepare(dataloader)[0]
 
-    tokenizer, collate_fn = init_dataloader_decoder_utils(
-        padding="longest", max_length=args.block_size, tokenizer=tokenizer,
-    )
+    # train_ds = data_loader.CombinedDataset_decoder(
+    #     block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+    #     use_sampler=True
+    # )
 
-    train_ds = data_loader.CombinedDataset_decoder(
-        block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights
-    )
-    # TODO: distributed sampler error
-    dataloader = prepare_dataloader(
-        train_ds,
-        batch_size=dataloader_batch_size,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
-    )
+    # dataloader = prepare_dataloader(
+    #     train_ds,
+    #     batch_size=dataloader_batch_size,
+    #     shuffle=True,
+    #     drop_last=True,
+    #     collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
+    # )
     if args.max_iters > 0:
         total_step = args.max_iters
         coordinator.print_on_master("if max_iters set, ignore num_epochs")
