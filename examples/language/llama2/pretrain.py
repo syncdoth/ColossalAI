@@ -202,10 +202,11 @@ def main():
 
     if args.pp > 1:
         per_device_batch_size = args.micro_batch_size // (coordinator.world_size * args.num_pp_mbs)
-        dataloader_batch_size = per_device_batch_size * args.num_pp_mbs
+        # dataloader_batch_size = per_device_batch_size * args.num_pp_mbs
     else:
         per_device_batch_size = args.micro_batch_size // coordinator.world_size
-        dataloader_batch_size = per_device_batch_size
+        # dataloader_batch_size = per_device_batch_size
+    dataloader_batch_size = args.micro_batch_size
 
     # ==============================
     # Initialize Booster
@@ -314,7 +315,7 @@ def main():
     # TODO: use accelerator just for data prepare...
     accelerator = Accelerator(
         gradient_accumulation_steps=grad_accum_step,
-        split_batches=False,
+        split_batches=True,
     )
     dataloader = accelerator.prepare_data_loader(dataloader)
 
