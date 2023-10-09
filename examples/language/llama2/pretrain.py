@@ -306,7 +306,7 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    dataloader = data_loader.create_dataloader_decoder(
+    dataloader, _ = data_loader.create_dataloader_decoder(
         batch_size=dataloader_batch_size, block_size=args.block_size,
         tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
         meta_collate_fn=tokenize_batch_for_pretrain)
