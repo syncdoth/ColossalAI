@@ -3,7 +3,7 @@ echo "install torch"
 conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia -y
 # conda
 echo "install other conda packages"
-conda install pandas matplotlib
+conda install pandas matplotlib -y
 conda install xformers -c xformers -y
 
 # pip install
