@@ -246,6 +246,10 @@ def main():
     is_pp_last_stage = use_pipeline and booster.plugin.stage_manager.is_last_stage()
     print_flag = (not use_pipeline and coordinator.is_master()) or (use_pipeline and is_pp_last_stage)
 
+    if use_pipeline:
+        # TRY:
+        print_flag = print_flag and coordinator.is_last_process()
+
     # ==============================
     # Initialize Tensorboard
     # ==============================
@@ -259,7 +263,7 @@ def main():
             "config": args,
             # "mode": "disabled",
             "name": args.run_name + f"-{coordinator.rank}",
-            "group": args.run_name,
+            # "group": args.run_name,
         }
         wandb.init(**wandb_args)
 
@@ -422,7 +426,7 @@ def main():
                 optimizer.zero_grad()
 
                 if not use_pipeline:
-                    all_reduce_mean(loss)
+                    loss = all_reduce_mean(loss)
                 if print_flag:
                     pbar.set_postfix({"loss": loss.item()})
                     # writer.add_scalar("loss", loss.item(), epoch * num_steps_per_epoch + step)
