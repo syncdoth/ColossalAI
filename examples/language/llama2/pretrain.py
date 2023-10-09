@@ -257,7 +257,7 @@ def main():
             "resume": False,  # "allow"
             "dir": args.wandb_dir,
             "config": args,
-            "mode": "disabled",
+            # "mode": "disabled",
             "name": args.run_name + f"-{coordinator.rank}",
             "group": args.run_name,
         }
