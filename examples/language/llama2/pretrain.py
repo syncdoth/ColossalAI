@@ -306,34 +306,34 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    # dataloader, _ = data_loader.create_dataloader_decoder(
-    #     batch_size=args.micro_batch_size, block_size=args.block_size,
-    #     tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-    #     meta_collate_fn=tokenize_batch_for_pretrain)
+    dataloader, _ = data_loader.create_dataloader_decoder(
+        batch_size=args.micro_batch_size, block_size=args.block_size,
+        tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+        meta_collate_fn=tokenize_batch_for_pretrain)
 
-    # # TODO: use accelerator just for data prepare...
-    # accelerator = Accelerator(
-    #     gradient_accumulation_steps=grad_accum_step,
-    #     split_batches=True,
+    # TODO: use accelerator just for data prepare...
+    accelerator = Accelerator(
+        gradient_accumulation_steps=grad_accum_step,
+        split_batches=True,
+    )
+    dataloader = accelerator.prepare_data_loader(dataloader)
+
+    # tokenizer, collate_fn = init_dataloader_decoder_utils(
+    #     padding="longest", max_length=args.block_size, tokenizer=tokenizer,
     # )
-    # dataloader = accelerator.prepare_data_loader(dataloader)
 
-    tokenizer, collate_fn = init_dataloader_decoder_utils(
-        padding="longest", max_length=args.block_size, tokenizer=tokenizer,
-    )
+    # train_ds = data_loader.CombinedDataset_decoder(
+    #     block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+    #     use_sampler=True
+    # )
 
-    train_ds = data_loader.CombinedDataset_decoder(
-        block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-        use_sampler=True
-    )
-
-    dataloader = prepare_dataloader(
-        train_ds,
-        batch_size=dataloader_batch_size,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
-    )
+    # dataloader = prepare_dataloader(
+    #     train_ds,
+    #     batch_size=dataloader_batch_size,
+    #     shuffle=True,
+    #     drop_last=True,
+    #     collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
+    # )
     if args.max_iters > 0:
         total_step = args.max_iters
         coordinator.print_on_master("if max_iters set, ignore num_epochs")
@@ -389,11 +389,11 @@ def main():
     num_steps_per_epoch = len(dataloader)
 
     # if resume training, set the sampler start index to the correct value
-    if dataloader.dataset.sampler is not None:
-        dataloader.dataset.sampler.set_start_index(sampler_start_idx)
+    # if dataloader.dataset.sampler is not None:
+    #     dataloader.dataset.sampler.set_start_index(sampler_start_idx)
     for epoch in range(start_epoch, args.num_epochs):
-        if dataloader.dataset.sampler is not None:
-            dataloader.dataset.sampler.set_epoch(epoch)
+        # if dataloader.dataset.sampler is not None:
+        #     dataloader.dataset.sampler.set_epoch(epoch)
         step_nums = num_steps_per_epoch - start_step
         dataloader_iter = iter(dataloader)
 
@@ -449,8 +449,8 @@ def main():
                 if epoch * num_steps_per_epoch + step >= args.max_iters:
                     break
         # the continue epochs are not resumed, so we need to reset the sampler start index and start step
-        if dataloader.dataset.sampler is not None:
-            dataloader.dataset.sampler.set_start_index(0)
+        # if dataloader.dataset.sampler is not None:
+        #     dataloader.dataset.sampler.set_start_index(0)
         start_step = 0
 
     coordinator.print_on_master(f"Max CUDA memory usage: {torch.cuda.max_memory_allocated()/1024**2:.2f} MB")
