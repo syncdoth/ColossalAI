@@ -23,7 +23,6 @@ from tqdm import tqdm
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers import AutoTokenizer
-from accelerate import Accelerator
 
 import colossalai
 from colossalai.booster import Booster
@@ -34,7 +33,6 @@ from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
 
 from model_utils import format_numel_str, get_model_numel
-from data_utils import StatefulDistributedSampler
 
 # retnet
 from retnet.retnet.modeling_retnet import RetNetForCausalLM
@@ -135,31 +133,6 @@ def get_config(model_name, config_name, **kwargs):
         raise ValueError(f"Unknown model {model_name}")
 
 
-
-class TestDataset(torch.utils.data.IterableDataset):
-    def __init__(self, plugin, block_size, vocab_size):
-        self.i = 0
-        self.data = None
-        self.plugin = plugin
-
-        self.input_ids = torch.randint(0, vocab_size, (1, block_size), dtype=torch.long)
-        self.labels = self.input_ids
-        self.attention_mask = torch.ones_like(self.input_ids)
-
-
-    def __iter__(self):
-        process_group = self.plugin.dp_group
-
-        sampler = StatefulDistributedSampler(
-            self, num_replicas=process_group.size(), rank=process_group.rank(), shuffle=False
-        )
-        for i in iter(sampler):
-            yield self.input_ids, self.labels, self.attention_mask
-
-    def __len__(self):
-        return int(5e8)
-
-
 def main():
     # ==============================
     # Parse Arguments
@@ -227,7 +200,7 @@ def main():
     grad_accum_step = args.batch_size // args.micro_batch_size
     assert grad_accum_step == 1, "grad_accum_step must be 1 for now"
 
-    if args.pp > 1:
+    if args.pp > 1: # TODO
         per_device_batch_size = args.micro_batch_size // (coordinator.world_size * args.num_pp_mbs)
         dataloader_batch_size = per_device_batch_size * args.num_pp_mbs
     else:
@@ -288,7 +261,7 @@ def main():
             "resume": False,  # "allow"
             "dir": args.wandb_dir,
             "config": args,
-            "mode": "disabled",
+            # "mode": "disabled",
             "name": args.run_name + f"-{coordinator.rank}",
             # "group": args.run_name,
         }
@@ -315,6 +288,10 @@ def main():
     }
     config = get_config(args.model_name, args.config, **tokenizer_kwargs, use_cache=False)
     model_class = MODEL_CLASS[args.model_name]
+    if args.model_name == 'retnet':
+        load_kwargs = dict(tensor_parallel=args.tp > 1)
+    else:
+        load_kwargs = {}
     # use lazy init when using GeminiPlugin
     init_ctx = (
         LazyInitContext(default_device=get_current_device())
@@ -322,7 +299,7 @@ def main():
     )
 
     with init_ctx:
-        model = model_class(config, tensor_parallel=args.tp > 1)
+        model = model_class(config, **load_kwargs)
 
     if args.grad_checkpoint:
         model.gradient_checkpointing_enable()
@@ -338,45 +315,14 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    ########################### Approach 1 #####################################
-    # dataloader, _ = data_loader.create_dataloader_decoder(
-    #     batch_size=args.micro_batch_size, block_size=args.block_size,
-    #     tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-    #     meta_collate_fn=tokenize_batch_for_pretrain)
+    tokenizer, collate_fn = init_dataloader_decoder_utils(
+        padding="longest", max_length=args.block_size, tokenizer=tokenizer,
+    )
 
-    # # TODO: use accelerator just for data prepare...
-    # accelerator = Accelerator(
-    #     gradient_accumulation_steps=grad_accum_step,
-    #     split_batches=True,
-    #     dispatch_batches=True,  # load in main, then broadcast
-    # )
-    # dataloader = accelerator.prepare(dataloader)
-
-    ########################### Approach 2 #####################################
-    # tokenizer, collate_fn = init_dataloader_decoder_utils(
-    #     padding="longest", max_length=args.block_size, tokenizer=tokenizer,
-    # )
-
-    # train_ds = data_loader.CombinedDataset_decoder(
-    #     block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-    #     use_sampler=True
-    # )
-
-    # dataloader = prepare_dataloader(
-    #     train_ds,
-    #     batch_size=dataloader_batch_size,
-    #     shuffle=True,
-    #     drop_last=True,
-    #     # collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
-    # )
-
-    train_ds = TestDataset(plugin, args.block_size, len(tokenizer))
-
-    def collate_fn(batch):
-        input_ids = torch.cat([x[0] for x in batch], dim=0)
-        labels = torch.cat([x[1] for x in batch], dim=0)
-        attention_mask = torch.cat([x[2] for x in batch], dim=0)
-        return input_ids, labels, attention_mask
+    train_ds = data_loader.CombinedDataset_decoder(
+        block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+        plugin=plugin
+    )
 
     dataloader = prepare_dataloader(
         train_ds,
@@ -401,23 +347,30 @@ def main():
     # ==============================
     # during pretrain, seqlen is fixed. So we can get relpos first.
     # ==============================
-    pre_retention_rel_pos = model.model.retnet_rel_pos(
-        args.block_size,
-        forward_impl='parallel',
-        get_decay_scale=False,
-    )
-    retention_rel_pos_device = []
-    for rel_pos_group in pre_retention_rel_pos:
-        group = []
-        for rel_pos in rel_pos_group:
-            if rel_pos is not None:
-                rel_pos = rel_pos.cuda()
-                rel_pos = rel_pos.to(default_dtype)
-                if isinstance(rel_pos, LazyTensor):
-                    rel_pos.materialize()
-            group.append(rel_pos)
-        retention_rel_pos_device.append(tuple(group))
-    pre_retention_rel_pos = tuple(retention_rel_pos_device)
+    if args.model_name == 'retnet':
+        pre_retention_rel_pos = model.model.retnet_rel_pos(
+            args.block_size,
+            forward_impl='parallel',
+            get_decay_scale=False,
+        )
+        retention_rel_pos_device = []
+        for rel_pos_group in pre_retention_rel_pos:
+            group = []
+            for rel_pos in rel_pos_group:
+                if rel_pos is not None:
+                    rel_pos = rel_pos.cuda()
+                    rel_pos = rel_pos.to(default_dtype)
+                    if isinstance(rel_pos, LazyTensor):
+                        rel_pos.materialize()
+                group.append(rel_pos)
+            retention_rel_pos_device.append(tuple(group))
+        pre_retention_rel_pos = tuple(retention_rel_pos_device)
+        if use_pipeline:
+            forward_kwargs = dict(pre_retention_rel_pos=pre_retention_rel_pos)
+        else:
+            forward_kwargs = dict(retention_rel_pos=pre_retention_rel_pos)
+    else:
+        forward_kwargs = {}
     # ==============================
 
     model, optimizer, _, dataloader, lr_scheduler = booster.boost(
@@ -459,12 +412,12 @@ def main():
                 if use_pipeline:
                     outputs = booster.execute_pipeline(
                         dataloader_iter, model, _criterion, optimizer, return_loss=True, return_outputs=True,
-                        pre_retention_rel_pos=pre_retention_rel_pos,
+                        **forward_kwargs,
                     )
                     loss = outputs["loss"]
                 else:
                     batch = next(dataloader_iter)
-                    outputs = model(**batch, retention_rel_pos=pre_retention_rel_pos)
+                    outputs = model(**batch, **forward_kwargs)
                     loss = outputs[0]
                     booster.backward(loss, optimizer)
 
