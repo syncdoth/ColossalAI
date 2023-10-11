@@ -89,22 +89,18 @@ def save(
     model: nn.Module,
     optimizer: Optimizer,
     lr_scheduler: _LRScheduler,
-    epoch: int,
-    step: int,
-    batch_size: int,
+    global_step: int,
     coordinator: DistCoordinator,
     save_dir: str,
 ):
-    save_dir = os.path.join(save_dir, f"epoch{epoch}-step{step}")
+    save_dir = os.path.join(save_dir, f"iter-{global_step}")
     os.makedirs(os.path.join(save_dir, "model"), exist_ok=True)
 
     booster.save_model(model, os.path.join(save_dir, "model"), shard=True)
     booster.save_optimizer(optimizer, os.path.join(save_dir, "optimizer"), shard=True)
     booster.save_lr_scheduler(lr_scheduler, os.path.join(save_dir, "lr_scheduler"))
     running_states = {
-        "epoch": epoch,
-        "step": step,
-        "sample_start_index": step * batch_size,
+        "step": global_step,
     }
     if coordinator.is_master():
         save_json(running_states, os.path.join(save_dir, "running_states.json"))
@@ -117,7 +113,7 @@ def load(
     booster.load_optimizer(optimizer, os.path.join(load_dir, "optimizer"))
     booster.load_lr_scheduler(lr_scheduler, os.path.join(load_dir, "lr_scheduler"))
     running_states = load_json(os.path.join(load_dir, "running_states.json"))
-    return running_states["epoch"], running_states["step"], running_states["sample_start_index"]
+    return running_states["step"]
 
 
 def _criterion(outputs, inputs):
@@ -133,7 +129,7 @@ def get_config(model_name, config_name, **kwargs):
         raise ValueError(f"Unknown model {model_name}")
 
 
-def main():
+def parse_args():
     # ==============================
     # Parse Arguments
     # ==============================
@@ -151,7 +147,6 @@ def main():
         help="Choose which plugin to use",
     )
     parser.add_argument("--max_iters", type=int, default=1e6, help="Max number of iterations")
-    parser.add_argument("-e", "--num_epochs", type=int, default=0, help="Number of epochs")
     parser.add_argument("-b", "--batch_size", type=int, default=2048, help="Local batch size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("-w", "--weight_decay", type=float, default=0.1, help="Weight decay")
@@ -177,7 +172,10 @@ def main():
     parser.add_argument("--datasets", type=str, default="wikipedia", help="comma-separated list of dataset names")
     parser.add_argument("--dataset_weights", type=str, default=None, help="comma-separated list of dataset weights")
     args = parser.parse_args()
+    return args
 
+def main():
+    args = parse_args()
     # ==============================
     # Parse comma-separated Arguments
     # ==============================
@@ -257,12 +255,12 @@ def main():
         # os.makedirs(args.tensorboard_dir, exist_ok=True)
         # writer = SummaryWriter(args.tensorboard_dir)
         wandb_args = {
-            "project": "RetNet Chronicles",  # "iqmt1xcu"
-            "resume": False,  # "allow"
+            "project": "RetNet Chronicles",
+            "resume": "allow",  # False
             "dir": args.wandb_dir,
             "config": args,
             # "mode": "disabled",
-            "name": args.run_name + f"-{coordinator.rank}",
+            "name": args.run_name,  # + f"-{coordinator.rank}",
             # "group": args.run_name,
         }
         wandb.init(**wandb_args)
@@ -331,17 +329,11 @@ def main():
         drop_last=True,
         collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
     )
-    if args.max_iters > 0:
-        total_step = args.max_iters
-        coordinator.print_on_master("if max_iters set, ignore num_epochs")
-        args.num_epochs = args.max_iters // len(dataloader) + 1
-    else:
-        total_step = args.num_epochs * len(dataloader)
     # ==============================
     # Initialize LR Scheduler
     # ==============================
     lr_scheduler = get_lr_scheduler(optimizer, optim_name='adamw', warmup_steps=args.warmup_steps,
-                                    base_lr=args.lr, min_lr=0.1 * args.lr, total_steps=total_step)
+                                    base_lr=args.lr, min_lr=0.1 * args.lr, total_steps=args.max_iters)
     default_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
     torch.set_default_dtype(default_dtype)
     # ==============================
@@ -384,77 +376,63 @@ def main():
     )
 
     # load checkpoint if specified
-    start_epoch = 0
     start_step = 0
-    sampler_start_idx = 0
     if args.load is not None:
         coordinator.print_on_master("Loading checkpoint")
-        start_epoch, start_step, sampler_start_idx = load(booster, model, optimizer, lr_scheduler, args.load)
-        coordinator.print_on_master(f"Loaded checkpoint {args.load} at epoch {start_epoch} step {start_step}")
+        start_step = load(booster, model, optimizer, lr_scheduler, args.load)
+        coordinator.print_on_master(f"Loaded checkpoint {args.load} at step {start_step}")
 
-    num_steps_per_epoch = len(dataloader)
+    # NOTE: dataloader skipping batches should be okay, since that is taken care of
+    # from internal logic of nucleus dataloader with state.json.
+    step_nums = args.max_iters - start_step
+    dataloader_iter = iter(dataloader)
 
-    # if resume training, set the sampler start index to the correct value
-    # dataloader.dataset.sampler.set_start_index(sampler_start_idx)
-    for epoch in range(start_epoch, args.num_epochs):
-        # dataloader.dataset.sampler.set_epoch(epoch)
-        step_nums = num_steps_per_epoch - start_step
-        dataloader_iter = iter(dataloader)
+    with tqdm(
+        range(step_nums),
+        disable=not print_flag,
+        total=args.max_iters,
+        initial=start_step,
+    ) as pbar:
+        for step in pbar:
+            global_step = start_step + step
+            if use_pipeline:
+                outputs = booster.execute_pipeline(
+                    dataloader_iter, model, _criterion, optimizer, return_loss=True, return_outputs=True,
+                    **forward_kwargs,
+                )
+                loss = outputs["loss"]
+            else:
+                batch = next(dataloader_iter)
+                outputs = model(**batch, **forward_kwargs)
+                loss = outputs[0]
+                booster.backward(loss, optimizer)
 
-        with tqdm(
-            range(step_nums),
-            desc=f"Epoch {epoch}",
-            disable=not print_flag,
-            total=num_steps_per_epoch,
-            initial=start_step,
-        ) as pbar:
-            for step in pbar:
-                if use_pipeline:
-                    outputs = booster.execute_pipeline(
-                        dataloader_iter, model, _criterion, optimizer, return_loss=True, return_outputs=True,
-                        **forward_kwargs,
-                    )
-                    loss = outputs["loss"]
-                else:
-                    batch = next(dataloader_iter)
-                    outputs = model(**batch, **forward_kwargs)
-                    loss = outputs[0]
-                    booster.backward(loss, optimizer)
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
 
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+            if not use_pipeline:
+                loss = all_reduce_mean(loss)
+            if print_flag:
+                pbar.set_postfix({"loss": loss.item()})
+                # writer.add_scalar("loss", loss.item(), epoch * num_steps_per_epoch + step)
+                wandb.log({
+                    "train_loss_per_batch": loss.item(),
+                    "lr": lr_scheduler.get_last_lr()[0],
+                }, step=global_step + 1)
 
-                if not use_pipeline:
-                    loss = all_reduce_mean(loss)
-                if print_flag:
-                    pbar.set_postfix({"loss": loss.item()})
-                    # writer.add_scalar("loss", loss.item(), epoch * num_steps_per_epoch + step)
-                    wandb.log({
-                        "train_loss_per_batch": loss.item(),
-                        "lr": lr_scheduler.get_last_lr()[0],
-                    }, step=epoch * num_steps_per_epoch + step)
-
-                if args.save_interval > 0 and (step + 1) % args.save_interval == 0:
-                    coordinator.print_on_master(f"Saving checkpoint")
-                    save(
-                        booster,
-                        model,
-                        optimizer,
-                        lr_scheduler,
-                        epoch,
-                        step + 1,
-                        args.batch_size,
-                        coordinator,
-                        os.path.join(args.save_dir, args.run_name),
-                    )
-                    coordinator.print_on_master(f"Saved checkpoint at epoch {epoch} step {step + 1}")
-
-                if epoch * num_steps_per_epoch + step >= args.max_iters:
-                    break
-        # the continue epochs are not resumed, so we need to reset the sampler start index and start step
-        # dataloader.dataset.sampler.set_start_index(0)
-        start_step = 0
+            if args.save_interval > 0 and (global_step + 1) % args.save_interval == 0:
+                coordinator.print_on_master(f"Saving checkpoint")
+                save(
+                    booster,
+                    model,
+                    optimizer,
+                    lr_scheduler,
+                    global_step + 1,
+                    coordinator,
+                    os.path.join(args.save_dir, args.run_name),
+                )
+                coordinator.print_on_master(f"Saved checkpoint at step {global_step + 1}")
 
     coordinator.print_on_master(f"Max CUDA memory usage: {torch.cuda.max_memory_allocated()/1024**2:.2f} MB")
 
