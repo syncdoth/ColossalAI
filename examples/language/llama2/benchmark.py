@@ -16,15 +16,19 @@ import colossalai
 from colossalai.booster import Booster
 from colossalai.booster.plugin import GeminiPlugin, HybridParallelPlugin, TorchFSDPPlugin
 from colossalai.cluster import DistCoordinator
-from colossalai.lazy import LazyInitContext
+from colossalai.lazy import LazyInitContext, LazyTensor
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
+
+
+from retnet.retnet.modeling_retnet import RetNetForCausalLM
+from retnet.retnet.configuration_retnet import RetNetConfig
 
 # ==============================
 # Constants
 # ==============================
 
-MODEL_CONFIGS = {
+LLAMA_CONFIGS = {
     "7b": LlamaConfig(max_position_embeddings=4096),
     "13b": LlamaConfig(
         hidden_size=5120,
@@ -43,12 +47,27 @@ MODEL_CONFIGS = {
     ),
 }
 
+MODEL_CLASS = {
+    "llama": LlamaForCausalLM,
+    "retnet": RetNetForCausalLM,
+}
+
+def get_config(model_name, config_name, **kwargs):
+    if model_name == "llama":
+        return LLAMA_CONFIGS[config_name]
+    elif model_name == "retnet":
+        return RetNetConfig.from_pretrained(config_name, **kwargs)
+    else:
+        raise ValueError(f"Unknown model {model_name}")
+
+
 
 def main():
     # ==============================
     # Parse Arguments
     # ==============================
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default='retnet')
     parser.add_argument("-c", "--config", type=str, default="7b", help="Model configuration")
     parser.add_argument(
         "-p",
@@ -155,9 +174,16 @@ def main():
     # ==============================
     dp_size = plugin.dp_size if isinstance(plugin, HybridParallelPlugin) else coordinator.world_size
 
-    config = MODEL_CONFIGS[args.config]
+    config = get_config(args.model_name, args.config, use_cache=False)
+    model_class = MODEL_CLASS[args.model_name]
+    if args.model_name == 'retnet':
+        model_kwargs = dict(tensor_parallel=args.tp > 1)
+    else:
+        model_kwargs = {}
+
     dataset = RandomDataset(
-        num_samples=args.batch_size * args.num_steps * dp_size, max_length=args.max_length, vocab_size=config.vocab_size
+        num_samples=args.batch_size * args.num_steps * dp_size, max_length=args.max_length, vocab_size=config.vocab_size,
+        max_steps=args.batch_size * args.num_steps * dp_size,
     )
     dataloader = plugin.prepare_dataloader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
@@ -171,12 +197,12 @@ def main():
     )
 
     with init_ctx:
-        model = LlamaForCausalLM(config)
+        model = model_class(config, **model_kwargs)
 
     if args.grad_checkpoint:
         model.gradient_checkpointing_enable()
 
-    if args.xformers:
+    if args.xformers and not 'retnet' in args.model_name:
         assert SUPPORT_FLASH, "Use flash attention while xfomers is not installed"
         replace_xformers(model)
 
@@ -188,6 +214,33 @@ def main():
 
     optimizer = HybridAdam(model.parameters())
     torch.set_default_dtype(torch.bfloat16)
+
+    if args.model_name == 'retnet':
+        pre_retention_rel_pos = model.model.retnet_rel_pos(
+            args.max_length,
+            forward_impl='parallel',
+            get_decay_scale=False,
+        )
+        retention_rel_pos_device = []
+        for rel_pos_group in pre_retention_rel_pos:
+            group = []
+            for rel_pos in rel_pos_group:
+                if rel_pos is not None:
+                    rel_pos = rel_pos.cuda()
+                    if isinstance(rel_pos, LazyTensor):
+                        rel_pos.materialize()
+                    rel_pos = rel_pos.to(torch.bfloat16)
+                group.append(rel_pos)
+            retention_rel_pos_device.append(tuple(group))
+        pre_retention_rel_pos = tuple(retention_rel_pos_device)
+        if isinstance(plugin, HybridParallelPlugin) and args.pp > 1:
+            forward_kwargs = dict(pre_retention_rel_pos=pre_retention_rel_pos)
+        else:
+            forward_kwargs = dict(retention_rel_pos=pre_retention_rel_pos)
+    else:
+        forward_kwargs = {}
+
+
     model, optimizer, _, dataloader, _ = booster.boost(model, optimizer, dataloader=dataloader)
     torch.set_default_dtype(torch.float)
     coordinator.print_on_master(f"Booster init max CUDA memory: {torch.cuda.max_memory_allocated()/1024**2:.2f} MB")
@@ -200,7 +253,8 @@ def main():
         for step in tqdm(range(len(dataloader)), desc="Step", disable=not coordinator.is_master()):
             performance_evaluator.on_step_start(step)
             booster.execute_pipeline(
-                data_iter, model, criterion=lambda outputs, inputs: outputs[0], optimizer=optimizer, return_loss=False
+                data_iter, model, criterion=lambda outputs, inputs: outputs[0], optimizer=optimizer, return_loss=False,
+                **forward_kwargs,
             )
             optimizer.step()
             optimizer.zero_grad()
@@ -208,7 +262,7 @@ def main():
     else:
         for step, batch in enumerate(tqdm(dataloader, desc="Step", disable=not coordinator.is_master())):
             performance_evaluator.on_step_start(step)
-            outputs = model(**batch)
+            outputs = model(**batch, **forward_kwargs)
             loss = outputs[0]
             booster.backward(loss, optimizer)
             optimizer.step()

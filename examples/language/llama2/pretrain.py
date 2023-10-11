@@ -29,11 +29,12 @@ import colossalai
 from colossalai.booster import Booster
 from colossalai.booster.plugin import GeminiPlugin, HybridParallelPlugin, LowLevelZeroPlugin
 from colossalai.cluster import DistCoordinator
-from colossalai.lazy import LazyInitContext
+from colossalai.lazy import LazyInitContext, LazyTensor
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
 
 from model_utils import format_numel_str, get_model_numel
+from data_utils import StatefulDistributedSampler
 
 # retnet
 from retnet.retnet.modeling_retnet import RetNetForCausalLM
@@ -42,6 +43,7 @@ from retnet.retnet.configuration_retnet import RetNetConfig
 # nucleus
 from nucleus import data_loader
 from nucleus.utils import get_lr_scheduler, init_dataloader_decoder_utils
+
 
 LLAMA_CONFIGS = {
     "7b": LlamaConfig(max_position_embeddings=4096),
@@ -131,6 +133,31 @@ def get_config(model_name, config_name, **kwargs):
         return RetNetConfig.from_pretrained(config_name, **kwargs)
     else:
         raise ValueError(f"Unknown model {model_name}")
+
+
+
+class TestDataset(torch.utils.data.IterableDataset):
+    def __init__(self, plugin, block_size, vocab_size):
+        self.i = 0
+        self.data = None
+        self.plugin = plugin
+
+        self.input_ids = torch.randint(0, vocab_size, (1, block_size), dtype=torch.long)
+        self.labels = self.input_ids
+        self.attention_mask = torch.ones_like(self.input_ids)
+
+
+    def __iter__(self):
+        process_group = self.plugin.dp_group
+
+        sampler = StatefulDistributedSampler(
+            self, num_replicas=process_group.size(), rank=process_group.rank(), shuffle=False
+        )
+        for i in iter(sampler):
+            yield self.input_ids, self.labels, self.attention_mask
+
+    def __len__(self):
+        return int(5e8)
 
 
 def main():
@@ -261,7 +288,7 @@ def main():
             "resume": False,  # "allow"
             "dir": args.wandb_dir,
             "config": args,
-            # "mode": "disabled",
+            "mode": "disabled",
             "name": args.run_name + f"-{coordinator.rank}",
             # "group": args.run_name,
         }
@@ -286,11 +313,12 @@ def main():
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
     }
-    config = get_config(args.model_name, args.config, **tokenizer_kwargs)
+    config = get_config(args.model_name, args.config, **tokenizer_kwargs, use_cache=False)
     model_class = MODEL_CLASS[args.model_name]
     # use lazy init when using GeminiPlugin
     init_ctx = (
-        LazyInitContext(default_device=get_current_device()) if isinstance(plugin, GeminiPlugin) else nullcontext()
+        LazyInitContext(default_device=get_current_device())
+        if isinstance(plugin, (HybridParallelPlugin, GeminiPlugin)) else nullcontext()
     )
 
     with init_ctx:
@@ -310,6 +338,7 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
+    ########################### Approach 1 #####################################
     # dataloader, _ = data_loader.create_dataloader_decoder(
     #     batch_size=args.micro_batch_size, block_size=args.block_size,
     #     tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
@@ -319,17 +348,35 @@ def main():
     # accelerator = Accelerator(
     #     gradient_accumulation_steps=grad_accum_step,
     #     split_batches=True,
+    #     dispatch_batches=True,  # load in main, then broadcast
     # )
-    # dataloader = accelerator.prepare_data_loader(dataloader)
+    # dataloader = accelerator.prepare(dataloader)
 
-    tokenizer, collate_fn = init_dataloader_decoder_utils(
-        padding="longest", max_length=args.block_size, tokenizer=tokenizer,
-    )
+    ########################### Approach 2 #####################################
+    # tokenizer, collate_fn = init_dataloader_decoder_utils(
+    #     padding="longest", max_length=args.block_size, tokenizer=tokenizer,
+    # )
 
-    train_ds = data_loader.CombinedDataset_decoder(
-        block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-        use_sampler=True
-    )
+    # train_ds = data_loader.CombinedDataset_decoder(
+    #     block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+    #     use_sampler=True
+    # )
+
+    # dataloader = prepare_dataloader(
+    #     train_ds,
+    #     batch_size=dataloader_batch_size,
+    #     shuffle=True,
+    #     drop_last=True,
+    #     # collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
+    # )
+
+    train_ds = TestDataset(plugin, args.block_size, len(tokenizer))
+
+    def collate_fn(batch):
+        input_ids = torch.cat([x[0] for x in batch], dim=0)
+        labels = torch.cat([x[1] for x in batch], dim=0)
+        attention_mask = torch.cat([x[2] for x in batch], dim=0)
+        return input_ids, labels, attention_mask
 
     dataloader = prepare_dataloader(
         train_ds,
@@ -366,6 +413,8 @@ def main():
             if rel_pos is not None:
                 rel_pos = rel_pos.cuda()
                 rel_pos = rel_pos.to(default_dtype)
+                if isinstance(rel_pos, LazyTensor):
+                    rel_pos.materialize()
             group.append(rel_pos)
         retention_rel_pos_device.append(tuple(group))
     pre_retention_rel_pos = tuple(retention_rel_pos_device)
@@ -393,11 +442,9 @@ def main():
     num_steps_per_epoch = len(dataloader)
 
     # if resume training, set the sampler start index to the correct value
-    if dataloader.dataset.sampler is not None:
-        dataloader.dataset.sampler.set_start_index(sampler_start_idx)
+    # dataloader.dataset.sampler.set_start_index(sampler_start_idx)
     for epoch in range(start_epoch, args.num_epochs):
-        if dataloader.dataset.sampler is not None:
-            dataloader.dataset.sampler.set_epoch(epoch)
+        # dataloader.dataset.sampler.set_epoch(epoch)
         step_nums = num_steps_per_epoch - start_step
         dataloader_iter = iter(dataloader)
 
@@ -453,8 +500,7 @@ def main():
                 if epoch * num_steps_per_epoch + step >= args.max_iters:
                     break
         # the continue epochs are not resumed, so we need to reset the sampler start index and start step
-        if dataloader.dataset.sampler is not None:
-            dataloader.dataset.sampler.set_start_index(0)
+        # dataloader.dataset.sampler.set_start_index(0)
         start_step = 0
 
     coordinator.print_on_master(f"Max CUDA memory usage: {torch.cuda.max_memory_allocated()/1024**2:.2f} MB")
