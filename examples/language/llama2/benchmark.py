@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore")  # ignore warnings
+
 import argparse
 import resource
 from contextlib import nullcontext
