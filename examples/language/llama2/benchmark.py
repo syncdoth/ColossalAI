@@ -185,7 +185,7 @@ def main():
     # ==============================
     dp_size = plugin.dp_size if isinstance(plugin, HybridParallelPlugin) else coordinator.world_size
 
-    config = get_config(args.model_name, args.config, use_cache=False)
+    config = get_config(args.model_name, args.config, use_cache=False, vocab_size=32000)
     model_class = MODEL_CLASS[args.model_name]
     if args.model_name == 'retnet':
         model_kwargs = dict(tensor_parallel=args.tp > 1)
