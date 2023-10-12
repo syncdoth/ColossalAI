@@ -17,7 +17,7 @@ from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 import colossalai
 from colossalai.booster import Booster
-from colossalai.booster.plugin import GeminiPlugin, HybridParallelPlugin, TorchFSDPPlugin
+from colossalai.booster.plugin import GeminiPlugin, HybridParallelPlugin, TorchFSDPPlugin, LowLevelZeroPlugin
 from colossalai.cluster import DistCoordinator
 from colossalai.lazy import LazyInitContext, LazyTensor
 from colossalai.nn.optimizer import HybridAdam
@@ -147,6 +147,14 @@ def main():
                 ),
                 cpu_offload=CPUOffload(offload_params=True),
             )
+    elif args.plugin == "zero":
+        plugin = LowLevelZeroPlugin(
+            stage=args.zero, precision="bf16", initial_scale=2**16, cpu_offload=False,
+        )
+    elif args.plugin == "zero_cpu":
+        plugin = LowLevelZeroPlugin(
+            stage=args.zero, precision="bf16", initial_scale=2**16, cpu_offload=True,
+        )
     elif args.plugin == "3d":
         plugin = HybridParallelPlugin(
             tp_size=args.tp,
