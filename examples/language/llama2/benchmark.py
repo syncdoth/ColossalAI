@@ -75,7 +75,7 @@ def main():
     parser.add_argument(
         "-p",
         "--plugin",
-        choices=["gemini", "gemini_auto", "fsdp", "fsdp_cpu", "3d", "3d_cpu"],
+        choices=["gemini", "gemini_auto", "fsdp", "fsdp_cpu", "3d", "3d_cpu", "zero", "zero_cpu"],
         default="gemini",
         help="Choose which plugin to use",
     )
