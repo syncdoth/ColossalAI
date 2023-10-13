@@ -173,6 +173,8 @@ def parse_args():
     # data
     parser.add_argument("--datasets", type=str, default="wikipedia", help="comma-separated list of dataset names")
     parser.add_argument("--dataset_weights", type=str, default=None, help="comma-separated list of dataset weights")
+    # init_embedding_from_llama
+    parser.add_argument("--init_embedding_from_llama", action="store_true", help="init embedding from llama")
     args = parser.parse_args()
     return args
 
@@ -303,6 +305,12 @@ def main():
 
     with init_ctx:
         model = model_class(config, **load_kwargs)
+        if args.init_embedding_from_llama:
+            model_size = os.path.basename(os.path.dirname(args.config)).split('-')[1]
+            llama_model = LlamaForCausalLM.from_pretrained(f"meta-llama/Llama-2-{model_size}-hf")
+            model.set_input_embeddings(llama_model.get_input_embeddings())
+            # freeze embed_tokens
+            model.model.embed_tokens.weight.requires_grad = False
 
     if args.grad_checkpoint:
         model.gradient_checkpointing_enable()
