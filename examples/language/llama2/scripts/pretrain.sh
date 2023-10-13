@@ -5,7 +5,7 @@ pw=$1
 #Load your environments and modules here
 ################
 
-HOSTFILE=$(realpath hosts.txt)
+HOSTFILE=$(realpath hosts-16node.txt)
 
 cd ..
 
@@ -19,7 +19,6 @@ sudo -E env "PATH=$PATH" colossalai run --nproc_per_node 8 --hostfile $HOSTFILE 
     --tokenizer meta-llama/Llama-2-7b-hf \
     --plugin hybrid_parallel \
     --batch_size 2048 \
-    --micro_batch_size 2048 \
     --block_size 4096 \
     --max_iters 1000000 \
     --lr 3e-4 \

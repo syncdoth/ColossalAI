@@ -40,7 +40,7 @@ from retnet.retnet.configuration_retnet import RetNetConfig
 
 # nucleus
 from nucleus import data_loader
-from nucleus.utils import get_lr_scheduler, init_dataloader_decoder_utils
+from nucleus.utils import get_lr_scheduler
 
 
 LLAMA_CONFIGS = {
@@ -165,7 +165,6 @@ def parse_args():
     parser.add_argument("--tp", type=int, default=4, help="Tensor parallel size")
     parser.add_argument("--pp", type=int, default=2, help="Pipeline parallel size")
     parser.add_argument("--num_pp_mbs", type=int, default=2, help="Number of micro batches in pipeline parallel")
-    parser.add_argument("--micro_batch_size", type=int, default=1024, help="Micro batch size (related to grad accum)")
     parser.add_argument("--zero_stage", type=int, default=0, choices=[0, 1, 2], help="zero stage (0, 1, 2)")
     parser.add_argument("--offload", action="store_true", help="Offload to CPU")
     # data
@@ -195,15 +194,18 @@ def main():
     # ==============================
     # compute batch size correctly
     # ==============================
-    grad_accum_step = args.batch_size // args.micro_batch_size
-    assert grad_accum_step == 1, "grad_accum_step must be 1 for now"
-
+    dp_degree = coordinator.world_size // (args.pp * args.tp)
+    per_dp_batch_size = args.batch_size // dp_degree
     if args.pp > 1: # TODO
-        per_device_batch_size = args.micro_batch_size // (coordinator.world_size * args.num_pp_mbs)
-        dataloader_batch_size = per_device_batch_size * args.num_pp_mbs
+        per_device_batch_size = per_dp_batch_size // args.num_pp_mbs
     else:
-        per_device_batch_size = args.micro_batch_size // coordinator.world_size
-        dataloader_batch_size = per_device_batch_size
+        per_device_batch_size = per_dp_batch_size
+
+    coordinator.print_on_master("############## BATCH SIZE INFO #################"
+                                f"\neffective batch size (in one step): {args.batch_size}"
+                                f"\nbatch size per dp group: {per_dp_batch_size}"
+                                f"\nbatch size per GPU device: {per_device_batch_size}\n"
+                                "################################################")
 
     # ==============================
     # Initialize Booster
@@ -313,21 +315,15 @@ def main():
     # ==============================
     # Initialize Data, DataLoader
     # ==============================
-    tokenizer, collate_fn = init_dataloader_decoder_utils(
-        padding="longest", max_length=args.block_size, tokenizer=tokenizer,
+    train_ds = data_loader.CombinedDataset(
+        seq_len=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
+        plugin=plugin,
     )
 
-    train_ds = data_loader.CombinedDataset_decoder(
-        block_size=args.block_size, tokenizer=tokenizer, datasets=args.datasets, dataset_weights=args.dataset_weights,
-        plugin=plugin
-    )
-
-    dataloader = prepare_dataloader(
+    dataloader = data_loader.create_dataloader(
         train_ds,
-        batch_size=dataloader_batch_size,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=partial(tokenize_batch_for_pretrain, collate_fn),
+        batch_size=args.batch_size,
+        seq_len=args.block_size,
     )
     # ==============================
     # Initialize LR Scheduler
@@ -365,8 +361,8 @@ def main():
         forward_kwargs = {}
     # ==============================
 
-    model, optimizer, _, dataloader, lr_scheduler = booster.boost(
-        model, optimizer, dataloader=dataloader, lr_scheduler=lr_scheduler
+    model, optimizer, _, _, lr_scheduler = booster.boost(
+        model, optimizer, lr_scheduler=lr_scheduler
     )
     torch.set_default_dtype(torch.float)
 
