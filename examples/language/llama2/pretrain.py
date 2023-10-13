@@ -306,7 +306,7 @@ def main():
     with init_ctx:
         model = model_class(config, **load_kwargs)
         if args.init_embedding_from_llama:
-            model_size = os.path.basename(os.path.dirname(args.config)).split('-')[1]
+            model_size = os.path.basename(args.config).split('-')[1]
             llama_model = LlamaForCausalLM.from_pretrained(f"meta-llama/Llama-2-{model_size}-hf")
             model.set_input_embeddings(llama_model.get_input_embeddings())
             # freeze embed_tokens

@@ -23,7 +23,7 @@ sudo -E env "PATH=$PATH" colossalai run --nproc_per_node 8 --hostfile $HOSTFILE 
     --batch_size 2048 \
     --block_size 4096 \
     --max_iters 1000000 \
-    --lr 2e-4 \
+    --lr 3e-4 \
     --weight_decay 0.1 \
     --warmup_steps 2000 \
     --grad_checkpoint \
