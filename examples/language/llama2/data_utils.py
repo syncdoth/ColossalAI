@@ -119,6 +119,6 @@ class RandomDataset(Dataset):
         i = idx % self.num_samples
         return {
             "input_ids": self.input_ids[i],
-            "attention_mask": self.attention_mask[i],
+            # "attention_mask": self.attention_mask[i],
             "labels": self.input_ids[i],
         }

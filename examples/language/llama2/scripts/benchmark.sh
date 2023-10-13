@@ -4,80 +4,87 @@
 #Load your environments and modules here
 ################
 
-HOSTFILE=$(realpath hosts-4node.txt)
+skip_gemini=1
+size=13b
 
+HOSTFILE=$(realpath hosts.txt)
+SAVEDIR=scripts/results-32node
 cd ..
+mkdir -p $SAVEDIR
 
 export OMP_NUM_THREADS=8
 export NCCL_P2P_LEVEL=PIX
 
-# gemini
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name llama -c 7b \
-#     -p gemini -g -x -b 8 > llama-7b-x-b8.bench
+###################################### gemini ##################################
+if [ $skip_gemini != 1 ]; then
+    echo "####################################"
+    echo "benchmarking gemini for llama-$size..."
+    echo "####################################"
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name llama -c 7b \
-#     -p gemini -g -x -b 16 > llama-7b-x-b16.bench
+    colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
+        --model_name llama -c $size \
+        -p gemini -g -x -b 16 -l 2048 > $SAVEDIR/llama-$size-gemini-x-b16-l2048.bench
 
-# # colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-# #     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-# #     -p gemini -g -b 8 > retnet-7b-b8.bench
+    echo "####################################"
+    echo "benchmarking gemini for retnet-$size..."
+    echo "####################################"
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p gemini -g -b 16 > retnet-7b-b16.bench
+    colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
+        --model_name retnet -c ../../../retnet/configs/retnet-$size \
+        -p gemini -g -x -b 16 -l 2048 > $SAVEDIR/retnet-$size-gemini-b16-l2048.bench
+fi
 
-# # 3D
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name llama -c 7b \
-#     -p 3d -g -x -b 32 --tp 4 --pp 2 --mbs 4 > llama-7b-x-3d-b32.bench
+####################################### 3D #####################################
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name llama -c 7b \
-#     -p 3d -g -x -b 64 --tp 4 --pp 2 --mbs 4 > llama-7b-x-3d-b64.bench
+function run() {
+    steps=10
+    model=$1
+    p=$2
+    bs=$3
+    tp=$4
+    pp=$5
+    z=$6
+    mbs=$7
+    seqlen=$8
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name llama -c 7b \
-#     -p 3d -g -x -b 128 --tp 4 --pp 2 --mbs 4 > llama-7b-x-3d-b128.bench
+    if [[ $seqlen = '' ]]; then
+        seqlen=4096
+    fi
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p 3d -g -x -b 32 --tp 4 --pp 2 --mbs 4 > retnet-7b-3d-b32.bench
+    if [ $model = retnet ]; then
+        cfg=../../../retnet/configs/retnet-$size
+    else
+        cfg=$size
+    fi
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p 3d -g -x -b 64 --tp 4 --pp 2 --mbs 4 > retnet-7b-3d-b64.bench
+    echo "############################################################"
+    echo "benchmarking for $model-$size..."
+    echo "plugin = $p"
+    echo "cfg: bs=$bs, tp=$tp, pp=$pp, zero=$z, mbs=$mbs, steps=$steps"
+    echo "############################################################"
 
+    colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
+        --model_name $model -c $cfg \
+        -p $p -s $steps -g -x \
+        -b $bs --tp $tp --pp $pp --mbs $mbs -l $seqlen \
+        --zero $z > $SAVEDIR/$model-$size-$p-b$bs-tp$tp-pp$pp-z$z-mbs$mbs-l$seqlen.bench
+}
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p 3d -g -x -b 32 --tp 2 --pp 4 --mbs 4 > retnet-7b-3d-b32-tp2-pp4.bench
+# Find best PP
+for bs in 16 32 64; do
+    for pp in 2 4; do
+        for z in 0 1; do
+            run retnet 3d $bs 1 $pp $z 4
+        done
+    done
+done
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p 3d -g -x -b 16 --tp 1 --pp 4 --mbs 4 > retnet-7b-3d-b16-tp1-pp4.bench
+run retnet 3d 16 1 2 1 16 8192
+run retnet 3d 32 1 2 1 32 8192
 
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p 3d -g -x -b 32 --tp 1 --pp 4 --mbs 4 > retnet-7b-3d-b32-tp1-pp4.bench
-
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p 3d -g -x -b 16 --tp 1 --pp 2 --mbs 4 > retnet-7b-3d-b16-tp1-pp2.bench
-
-
-# colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-#     --model_name retnet -c ../../../retnet/configs/retnet-7b \
-#     -p 3d -g -x -b 32 --tp 1 --pp 2 --mbs 4 --zero 1 > retnet-7b-3d-b32-tp1-pp2-z1.bench
-
-
-colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-    --model_name retnet -c ../../../retnet/configs/retnet-7b \
-    -p 3d -g -x -b 64 --tp 1 --pp 2 --mbs 4 --zero 1 > retnet-7b-3d-b64-tp1-pp2-z1.bench
-
-
-colossalai run --nproc_per_node 8 --hostfile $HOSTFILE benchmark.py \
-    --model_name retnet -c ../../../retnet/configs/retnet-7b \
-    -p 3d -g -x -b 32 --tp 1 --pp 2 --mbs 2 --zero 1 > retnet-7b-3d-b32-tp1-pp2-z1-m2.bench
-
+# Try TP
+# run retnet 3d 128 2 2 1 16
+# run retnet 3d 128 4 2 1 16
+# run retnet 3d 128 4 2 1 8
+# run retnet 3d 64 4 2 1 8
+# run retnet 3d 64 4 2 1 4
